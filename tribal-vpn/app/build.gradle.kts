@@ -88,6 +88,12 @@ dependencies {
     // Phase 3: SSH transport
     implementation("com.hierynomus:sshj:0.38.0")
 
+    // Same BouncyCastle artifact+version sshj 0.38.0 bundles internally
+    // (implementation-scoped there, so it is not on our compile classpath).
+    // We need the Provider class directly to swap out Android's stub "BC" -
+    // see TribalVpnApp.onCreate.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.75")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // Unit tests (JVM only - see app/src/test)
