@@ -1,9 +1,12 @@
 package com.tribal.vpn.data
 
+import kotlinx.serialization.Serializable
+
 /**
  * Represents a single saved VPN connection profile.
  * This is pure data - no hardcoded connection stats live here.
  */
+@Serializable
 data class VpnConfig(
     val id: String,
     val name: String,
@@ -20,6 +23,7 @@ data class VpnConfig(
     val udpGatewayPort: Int = 7300,
     val mtu: Int = 1400
 ) {
+    @Serializable
     enum class AuthMethod { PASSWORD, KEY }
 
     fun isValid(): Boolean {
