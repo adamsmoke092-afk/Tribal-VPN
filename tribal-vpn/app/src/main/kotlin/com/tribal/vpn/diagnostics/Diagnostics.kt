@@ -4,7 +4,6 @@ import android.app.ActivityManager
 import android.app.ApplicationExitInfo
 import android.content.Context
 import android.os.Build
-import android.os.Process
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -129,7 +128,7 @@ object Diagnostics {
                     append(exitReasonsBlock(context))
                     append("\n=== lines of interest ===\n")
                     append(fatalLines(logcat))
-                    append("\n\n=== logcat tail (uid-scoped, main+crash buffers) ===\n")
+                    append("\n\n=== logcat tail (this app's uid, main+crash buffers) ===\n")
                     append(logcat)
                 }
                 File(dir, DIAG_REPORT).writeText(report)
@@ -141,12 +140,13 @@ object Diagnostics {
 
     private fun captureLogcat(): String {
         return try {
-            // --uid scopes to ALL pids of this app's uid, so entries emitted by
-            // the previous (dead) process are included; plain apps may read
-            // their own uid's logcat entries without READ_LOGS.
+            // logd already restricts unprivileged readers to their own uid's
+            // entries (which covers the previous, dead pid too) - and --uid
+            // is not supported by every logcat build (it produced a usage
+            // dump on the dev phone), so we don't use it.
             val p = ProcessBuilder(
                 "logcat", "-d", "-b", "main", "-b", "crash",
-                "-t", "800", "-v", "time", "--uid=${Process.myUid()}"
+                "-t", "800", "-v", "time"
             ).redirectErrorStream(true).start()
             val bytes = ByteArrayOutputStream().use { sink ->
                 val buf = ByteArray(8192)
