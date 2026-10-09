@@ -172,7 +172,8 @@ class TribalVpnService : VpnService() {
                 val tunnelStarted = NativeTunnelBridge.startTunnel(
                     tunFd = vpnInterface!!.fd,
                     socksAddr = "127.0.0.1",
-                    socksPort = sshConfig.socksBindPort
+                    socksPort = sshConfig.socksBindPort,
+                    filesDir = filesDir.absolutePath
                 )
                 if (!tunnelStarted) {
                     appendLog(
