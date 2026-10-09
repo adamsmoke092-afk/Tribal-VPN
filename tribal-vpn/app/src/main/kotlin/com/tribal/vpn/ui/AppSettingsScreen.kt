@@ -42,7 +42,6 @@ fun AppSettingsScreen(
     appVersion: String = "1.0.0"
 ) {
     val autoReconnect by viewModel.autoReconnect.collectAsStateWithLifecycle()
-    val biometricLock by viewModel.requireBiometrics.collectAsStateWithLifecycle()
 
     Column(
         modifier = Modifier
@@ -80,9 +79,12 @@ fun AppSettingsScreen(
             SettingsRow(
                 icon = Icons.Filled.Lock,
                 title = "Require biometrics",
-                subtitle = "Lock saved passwords behind Face/Fingerprint"
+                subtitle = "Not yet implemented — will lock saved passwords behind Face/Fingerprint"
             ) {
-                GoldSwitchStandalone(biometricLock) { viewModel.setRequireBiometrics(it) }
+                // No fake toggle: nothing enforces this setting yet, so it must
+                // not present itself as a working capability (the
+                // no-fabricated-state rule in README_DATA_INTEGRITY.md).
+                Icon(Icons.Filled.Schedule, contentDescription = null, tint = MidGray.copy(alpha = 0.5f))
             }
         }
 
