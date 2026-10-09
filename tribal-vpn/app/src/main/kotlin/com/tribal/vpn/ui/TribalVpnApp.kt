@@ -17,7 +17,7 @@ private val Black = Color(0xFF000000)
 private val NavBg = Color(0xFF08080A)
 private val MidGray = Color(0xFF6B6B70)
 
-private enum class Tab { HOME, PROFILES, LOGS, SETTINGS }
+private enum class Tab { HOME, PROFILES, LOGS, LAST_RUN, SETTINGS }
 
 /**
  * Top-level navigation shell. This is the composable MainActivity should
@@ -55,6 +55,7 @@ fun TribalVpnApp(
                     onEditProfile = { editingProfile = EditTarget.Existing(it) }
                 )
                 tab == Tab.LOGS -> LogsScreen(viewModel = viewModel)
+                tab == Tab.LAST_RUN -> LastRunScreen()
                 tab == Tab.SETTINGS -> AppSettingsScreen(
                     viewModel = viewModel,
                     isIgnoringBatteryOptimizations = isIgnoringBatteryOptimizations,
@@ -76,6 +77,7 @@ private fun BottomNavBar(current: Tab, onSelect: (Tab) -> Unit) {
         NavItem(Icons.Filled.Home, "Home", current == Tab.HOME) { onSelect(Tab.HOME) }
         NavItem(Icons.Filled.Dns, "Profiles", current == Tab.PROFILES) { onSelect(Tab.PROFILES) }
         NavItem(Icons.Filled.Article, "Activity", current == Tab.LOGS) { onSelect(Tab.LOGS) }
+        NavItem(Icons.Filled.BugReport, "Last Run", current == Tab.LAST_RUN) { onSelect(Tab.LAST_RUN) }
         NavItem(Icons.Filled.Settings, "Settings", current == Tab.SETTINGS) { onSelect(Tab.SETTINGS) }
     }
 }

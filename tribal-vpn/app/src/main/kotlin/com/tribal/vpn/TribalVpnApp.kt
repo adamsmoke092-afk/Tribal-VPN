@@ -1,6 +1,7 @@
 package com.tribal.vpn
 
 import android.app.Application
+import com.tribal.vpn.diagnostics.Diagnostics
 import java.io.File
 
 /**
@@ -14,6 +15,9 @@ class TribalVpnApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // First: record whether the previous run died abnormally and (re)write
+        // the running marker, before anything else can die.
+        Diagnostics.init(this)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {

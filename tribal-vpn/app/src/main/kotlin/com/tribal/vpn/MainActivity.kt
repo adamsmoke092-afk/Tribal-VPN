@@ -19,6 +19,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import com.tribal.vpn.diagnostics.Diagnostics
 import com.tribal.vpn.ui.VpnViewModel
 import com.tribal.vpn.vpn.TribalVpnService
 import java.io.File
@@ -58,6 +59,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         reportLastCrashIfAny()
+        Diagnostics.runStartupCapture(applicationContext)
         refreshBatteryOptimizationState()
 
         setContent {
@@ -79,6 +81,14 @@ class MainActivity : ComponentActivity() {
         // The user may have granted/revoked this in system Settings while the
         // app was backgrounded - re-check rather than trusting stale state.
         refreshBatteryOptimizationState()
+    }
+
+    override fun onDestroy() {
+        // Backing out of the last Activity is the one clean-shutdown signal
+        // Android reliably gives us - it clears the abnormal-end marker.
+        // Crashes, native aborts and system kills skip this by definition.
+        if (isFinishing) Diagnostics.clearRunningMarker()
+        super.onDestroy()
     }
 
     /**

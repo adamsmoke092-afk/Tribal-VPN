@@ -11,6 +11,7 @@ import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.tribal.vpn.MainActivity
 import com.tribal.vpn.data.VpnConfig
+import com.tribal.vpn.diagnostics.Diagnostics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -46,6 +47,9 @@ class TribalVpnService : VpnService() {
         fun appendLog(plain: String?, technical: String?, isError: Boolean = false) {
             val entry = LogEntry(System.currentTimeMillis(), plain, technical, isError)
             _logs.value = (_logs.value + entry).takeLast(MAX_LOG_ENTRIES)
+            // Durable mirror: fsync'd to disk so the last line before a hard
+            // death (native crash / system kill) is never lost.
+            Diagnostics.appendLogLine(entry.timestampMillis, plain, technical, isError)
         }
 
         fun clearLogs() {
