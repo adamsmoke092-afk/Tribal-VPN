@@ -5,6 +5,7 @@ import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import net.schmizz.sshj.connection.channel.direct.Parameters
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import java.io.IOException
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -62,6 +63,18 @@ class SshTunnelService(
                 }
                 return socket
             }
+
+            // sshj's SocketClient.connect only ever calls the no-arg
+            // createSocket() above; the host/port variants are abstract on
+            // Android and must exist — fail loudly instead of faking them.
+            override fun createSocket(host: String, port: Int): Socket =
+                throw UnsupportedOperationException("Not used by sshj")
+            override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
+                throw UnsupportedOperationException("Not used by sshj")
+            override fun createSocket(host: InetAddress, port: Int): Socket =
+                throw UnsupportedOperationException("Not used by sshj")
+            override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket =
+                throw UnsupportedOperationException("Not used by sshj")
         }
         ssh.connectTimeout = config.connectTimeoutMs
 
