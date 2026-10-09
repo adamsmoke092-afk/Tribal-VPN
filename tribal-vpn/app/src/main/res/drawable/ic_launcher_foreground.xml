@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Simple gold lightning-bolt mark on transparent ground, centered in the
+         standard 108x108 adaptive-icon safe zone (icon content should sit
+         within the inner 66x66 to survive circular/rounded-square masking). -->
+    <path
+        android:fillColor="#F5B700"
+        android:pathData="M58,21 L34,60 L50,60 L46,87 L76,48 L58,48 Z" />
+</vector>
