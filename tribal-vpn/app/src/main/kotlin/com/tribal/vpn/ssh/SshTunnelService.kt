@@ -8,6 +8,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import javax.net.SocketFactory
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -50,17 +51,22 @@ class SshTunnelService(
     fun connect() {
         onLog("Connecting to ${config.host}…", "Opening SSH session to ${config.host}:${config.port}", false)
 
-        // sshj lets us supply our own Socket, which is how protect() gets applied
-        // before the TCP handshake completes.
-        val rawSocket = Socket()
-        val protected = protectSocket(rawSocket)
-        if (!protected) {
-            throw IOException("VpnService.protect() failed — refusing to connect (would create a routing loop)")
+        // sshj has no connect(Socket): SocketClient creates its own socket via
+        // a javax.net.SocketFactory, so the factory is the hook where protect()
+        // runs on the socket BEFORE the TCP handshake completes.
+        ssh.socketFactory = object : SocketFactory() {
+            override fun createSocket(): Socket {
+                val socket = Socket()
+                if (!protectSocket(socket)) {
+                    throw IOException("VpnService.protect() failed — refusing to connect (would create a routing loop)")
+                }
+                return socket
+            }
         }
-        rawSocket.connect(InetSocketAddress(config.host, config.port), config.connectTimeoutMs)
+        ssh.connectTimeout = config.connectTimeoutMs
 
         ssh.addHostKeyVerifier(PromiscuousVerifier()) // TODO: replace with known_hosts/TOFU pinning before production use
-        ssh.connectVia(rawSocket)
+        ssh.connect(config.host, config.port)
         ssh.connection.keepAlive.keepAliveInterval = config.serverAliveIntervalSeconds
 
         authenticate()
