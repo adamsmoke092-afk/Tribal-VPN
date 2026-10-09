@@ -77,8 +77,10 @@ dependencies {
     // Encrypted local storage for VPN profiles (passwords never stored in plaintext)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    // JSON serialization for profile persistence
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
+    // JSON serialization for profile persistence. 1.6.3 is the runtime that
+    // pairs with the Kotlin 1.9.24 serialization plugin — 1.7.x requires
+    // Kotlin 2.0 and fails compilation against this project's toolchain.
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     // Coroutines for traffic sampling / connection state flows
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
