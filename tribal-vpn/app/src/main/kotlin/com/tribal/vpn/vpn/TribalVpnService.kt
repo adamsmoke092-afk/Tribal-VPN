@@ -209,7 +209,13 @@ class TribalVpnService : VpnService() {
                 appendLog("Connected", "tun0 established, mtu=${config.mtu}")
                 updateNotification(ConnectionState.CONNECTED)
 
-            } catch (e: Exception) {
+            } catch (e: CancellationException) {
+                // User-initiated disconnect cancelled this job - not a failure.
+                return@launch
+            } catch (e: Throwable) {
+                // Throwable, not Exception: Errors (NoClassDefFoundError,
+                // UnsatisfiedLinkError, OutOfMemoryError, ...) must surface as
+                // an honest ERROR state, not silently kill the app.
                 _connectionState.value = ConnectionState.ERROR
                 appendLog("Connection failed: ${e.message}", e.stackTraceToString(), isError = true)
                 updateNotification(ConnectionState.ERROR)

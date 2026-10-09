@@ -20,6 +20,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import com.tribal.vpn.ui.VpnViewModel
+import com.tribal.vpn.vpn.TribalVpnService
+import java.io.File
 
 /**
  * Entry point. Handles two real OS-level permissions before the app can
@@ -55,6 +57,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        reportLastCrashIfAny()
         refreshBatteryOptimizationState()
 
         setContent {
@@ -76,6 +79,28 @@ class MainActivity : ComponentActivity() {
         // The user may have granted/revoked this in system Settings while the
         // app was backgrounded - re-check rather than trusting stale state.
         refreshBatteryOptimizationState()
+    }
+
+    /**
+     * If the previous session died from an uncaught crash, surface it in the
+     * in-app Logs screen instead of it vanishing (no adb/logcat on the dev
+     * phone). Consumed once - the crash file is deleted after being read.
+     */
+    private fun reportLastCrashIfAny() {
+        try {
+            val file = File(filesDir, TribalVpnApp.LAST_CRASH_FILE)
+            if (!file.exists()) return
+            val trace = file.readText()
+            file.delete()
+            val firstLines = trace.lineSequence().take(6).joinToString("\n")
+            TribalVpnService.appendLog(
+                "App crashed last session - see technical details",
+                "Last crash (top of stack):\n$firstLines",
+                isError = true
+            )
+        } catch (_: Throwable) {
+            // Crash reporting must never crash the app.
+        }
     }
 
     private fun refreshBatteryOptimizationState() {
