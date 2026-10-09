@@ -27,7 +27,7 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK (ndk-build: hev-socks5-tunnel + tribal_tunnel_bridge)
+      - name: "Build debug APK (ndk-build: hev-socks5-tunnel + tribal_tunnel_bridge)"
         run: gradle :app:assembleDebug
 
       - name: Upload APK
