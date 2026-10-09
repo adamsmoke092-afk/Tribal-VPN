@@ -58,7 +58,15 @@ class SshTunnelService(
         ssh.socketFactory = object : SocketFactory() {
             override fun createSocket(): Socket {
                 val socket = Socket()
+                // Android 9+ creates the real OS socket lazily: a fresh
+                // unconnected Socket has no valid fd, so VpnService.protect()
+                // (a setsockopt on the fd) returns false. bind(null) forces
+                // fd creation (wildcard address, ephemeral port) while leaving
+                // the socket unconnected, so protect() marks a real fd BEFORE
+                // the TCP handshake — exactly the order VpnService requires.
+                socket.bind(null)
                 if (!protectSocket(socket)) {
+                    try { socket.close() } catch (_: Exception) {}
                     throw IOException("VpnService.protect() failed — refusing to connect (would create a routing loop)")
                 }
                 return socket
