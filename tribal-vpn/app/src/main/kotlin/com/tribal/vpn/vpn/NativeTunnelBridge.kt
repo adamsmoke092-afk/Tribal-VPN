@@ -1,5 +1,6 @@
 package com.tribal.vpn.vpn
 
+import android.util.Log
 import java.io.File
 import hev.htproxy.TProxyService
 
@@ -15,11 +16,15 @@ import hev.htproxy.TProxyService
  * (uncatchable). Phase 5's externs remain in app/src/main/cpp/tunnel_bridge.cpp.
  *
  * IMPORTANT: TribalVpnService MUST treat a false return from startTunnel()/
- * startUdpGateway() as a real failure — do not swallow it and report Connected
- * anyway. If startTunnel() returns false, "Connected" still only means "tun
- * interface + SSH SOCKS5 proxy are up" — traffic is NOT flowing end-to-end.
+ * startUdpGateway() as a real failure - never report Connected anyway. A
+ * false return here aborts the connection and closes tun0.
+ *
+ * Every step is logged (logcat tag TribalTunnelBridge AND the durable app
+ * log) so a silent false can never happen again without a trace.
  */
 object NativeTunnelBridge {
+
+    private const val TAG = "TribalTunnelBridge"
 
     private var libraryLoaded = false
 
@@ -30,8 +35,7 @@ object NativeTunnelBridge {
             System.loadLibrary("tribal_tunnel_bridge")
             true
         } catch (e: UnsatisfiedLinkError) {
-            // Not fatal — callers check isAvailable before use, and this
-            // reports an honest "engine missing" instead of crashing.
+            log("bridge library failed to load: ${e.message}", isError = true)
             false
         }
     }
@@ -41,15 +45,16 @@ object NativeTunnelBridge {
     /**
      * Wires the tun fd to the local SOCKS5 proxy opened by SshTunnelService.
      * The tun fd stays owned by TribalVpnService's ParcelFileDescriptor -
-     * we only hand the raw fd to hev and never close it here (hev does not
-     * close it either; closing is cleanupInterface()'s one job).
+     * we only hand the raw fd to hev and never close it here.
      *
      * @param filesDir absolute path of the app's files dir (for the config)
-     * @return true iff hev accepted the config and started its relay worker —
-     *         never assume success.
+     * @return true iff hev accepted the config and started its relay worker.
      */
     fun startTunnel(tunFd: Int, socksAddr: String, socksPort: Int, filesDir: String): Boolean {
-        if (!libraryLoaded) return false
+        if (!libraryLoaded) {
+            log("startTunnel: bridge library not loaded - relay cannot start (tun_fd=$tunFd)", isError = true)
+            return false
+        }
         // Config fields verified against upstream src/hev-config.c. udp 'tcp'
         // because the app's SOCKS5 server has no UDP ASSOCIATE - UDP is
         // Phase 5's job (badvpn-udpgw).
@@ -63,20 +68,33 @@ object NativeTunnelBridge {
             append("  address: $socksAddr\n")
             append("  udp: 'tcp'\n")
         }
+        val configFile = File(filesDir, "hev_tunnel_config.yml")
         return try {
-            val configFile = File(filesDir, "hev_tunnel_config.yml")
             configFile.writeText(config)
-            // Upstream's contract: true iff the relay worker started with a
-            // readable config path and a valid fd.
-            TProxyService.TProxyStartService(configFile.absolutePath, tunFd)
-        } catch (e: Exception) {
-            // Config file write failure = honest failure to start.
+            log("startTunnel: config=${configFile.absolutePath} tun_fd=$tunFd\n$config")
+            // Upstream binding (hev-jni.c): returns jboolean - true iff the
+            // relay worker started with a readable config path and a valid fd.
+            val started = TProxyService.TProxyStartService(configFile.absolutePath, tunFd)
+            log("startTunnel: TProxyStartService returned $started")
+            started
+        } catch (t: Throwable) {
+            log(
+                "startTunnel: ${t.javaClass.simpleName}: ${t.message} " +
+                    "(config=${configFile.absolutePath} tun_fd=$tunFd)",
+                isError = true
+            )
             false
         }
     }
 
     fun stopTunnel() {
-        if (libraryLoaded) TProxyService.TProxyStopService()
+        if (!libraryLoaded) return
+        try {
+            val stopped = TProxyService.TProxyStopService()
+            log("stopTunnel: TProxyStopService returned $stopped")
+        } catch (t: Throwable) {
+            log("stopTunnel: ${t.javaClass.simpleName}: ${t.message}", isError = true)
+        }
     }
 
     /** @return true if the UDP gateway actually started, false otherwise. */
@@ -87,6 +105,11 @@ object NativeTunnelBridge {
 
     fun stopUdpGateway() {
         if (libraryLoaded) nativeStopUdpGateway()
+    }
+
+    private fun log(message: String, isError: Boolean = false) {
+        if (isError) Log.e(TAG, message) else Log.i(TAG, message)
+        TribalVpnService.appendLog(null, message, isError)
     }
 
     // --- JNI externs; implemented in app/src/main/cpp/tunnel_bridge.cpp ---

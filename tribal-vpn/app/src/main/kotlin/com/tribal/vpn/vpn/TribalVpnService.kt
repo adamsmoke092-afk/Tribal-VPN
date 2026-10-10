@@ -177,13 +177,18 @@ class TribalVpnService : VpnService() {
                 )
                 if (!tunnelStarted) {
                     appendLog(
-                        "Tunnel interface is up, but packet routing is not active",
+                        "Connection failed: the packet relay did not start",
                         "NativeTunnelBridge.startTunnel() returned false — the native packet " +
-                            "relay (hev-socks5-tunnel) failed to start. tun0 and the SSH " +
-                            "SOCKS5 proxy are both live, but IP packets are not being relayed " +
-                            "between them. See logcat (TribalTunnelBridge) and README_DATA_INTEGRITY.md.",
+                            "relay (hev-socks5-tunnel) did not start, so no traffic can flow " +
+                            "end-to-end. Aborting instead of reporting Connected (no fabricated " +
+                            "state) and closing tun0 so the phone keeps its normal internet. " +
+                            "The startTunnel trace is in the entries above.",
                         isError = true
                     )
+                    // A tun0 without a live relay would blackhole the phone's
+                    // traffic - fail honestly and let the catch block tear
+                    // everything down.
+                    throw IllegalStateException("Native packet relay failed to start")
                 }
 
                 // --- Phase 5: UDP gateway (only meaningful once Phase 4 relay is live) ---
