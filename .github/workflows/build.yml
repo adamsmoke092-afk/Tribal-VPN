@@ -30,6 +30,21 @@ jobs:
       - name: "Build debug APK (ndk-build: hev-socks5-tunnel + tribal_tunnel_bridge)"
         run: gradle :app:assembleDebug
 
+      - name: Report native ELF segments + APK lib compression
+        # Diagnostic only: it must never block the APK artifact from uploading,
+        # so failures here (missing path, grep no-match, no unzip) are ignored.
+        if: always()
+        continue-on-error: true
+        run: |
+          READELF="$(ls -d "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf | head -n1)"
+          for so in app/build/intermediates/merged_native_libs/debug/out/lib/arm64-v8a/*.so; do
+            echo "=== $so ==="
+            "$READELF" -lW "$so" | grep -E 'GNU_RELRO|LOAD'
+          done
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          echo "=== lib entries in APK (Stored = uncompressed/page-aligned) ==="
+          unzip -v "$APK" | grep 'lib/'
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

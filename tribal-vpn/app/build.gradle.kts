@@ -43,6 +43,17 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // extractNativeLibs=true: the Android 8.x linker fails dlopen
+            // with "can't enable GNU RELRO protection ... Out of memory" when
+            // loading .so files straight out of the APK (the default
+            // uncompressed in-place path). Extract to disk so the linker
+            // loads a real file. Costs install size, fixes the RELRO failure.
+            useLegacyPackaging = true
+        }
+    }
+
     buildFeatures {
         compose = true
     }
