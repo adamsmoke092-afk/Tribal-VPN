@@ -11,7 +11,10 @@ data class SshConfig(
     val username: String,
     val password: String?,
     val privateKeyAlias: String?,
-    val socksBindPort: Int = 1080,
+    // 0 = let the kernel assign a free ephemeral port for the local SOCKS5
+    // listener. The bound port is exposed by SshTunnelService.socksPort and
+    // fed to the relay config, so two instances can never collide on 1080.
+    val socksBindPort: Int = 0,
     val serverAliveIntervalSeconds: Int = 15,
     val connectTimeoutMs: Int = 10_000
 )

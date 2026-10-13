@@ -35,12 +35,14 @@ class NetworkChangeMonitor(
             val isNewNetwork = lastKnownNetwork != null && lastKnownNetwork != network
             lastKnownNetwork = network
 
+            // Reconnect only if a relay was actually up when the network
+            // changed. Error and idle states are deliberately NOT a trigger:
+            // an Error state is not "connected" (a failed or aborted connect
+            // must not be resurrected just because the OS re-reports its
+            // networks), and reconnecting with no live tunnel would be
+            // activity the user never asked for.
             if (isNewNetwork && currentConnectionState() == TribalVpnService.ConnectionState.CONNECTED) {
-                onLog("Network changed, reconnecting…", "ConnectivityManager.onAvailable: network=$network", false)
-                scheduleReconnect()
-            } else if (isNewNetwork && currentConnectionState() == TribalVpnService.ConnectionState.ERROR) {
-                // We were down due to a network error - a new network appearing
-                // is exactly the trigger to retry.
+                onLog("Network changed, reconnecting...", "ConnectivityManager.onAvailable: network=$network", false)
                 scheduleReconnect()
             }
         }
@@ -89,7 +91,7 @@ class NetworkChangeMonitor(
         backoffJob?.cancel()
         backoffJob = scope.launch {
             delay(currentBackoffMs)
-            onLog("Reconnecting…", "Retry after ${currentBackoffMs}ms backoff", false)
+            onLog("Reconnecting...", "Retry after ${currentBackoffMs}ms backoff", false)
             onReconnectRequested()
             currentBackoffMs = (currentBackoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
         }

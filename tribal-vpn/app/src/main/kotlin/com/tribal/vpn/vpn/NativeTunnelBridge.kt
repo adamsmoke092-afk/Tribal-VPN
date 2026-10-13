@@ -1,5 +1,6 @@
 package com.tribal.vpn.vpn
 
+import android.os.Debug
 import android.util.Log
 import java.io.File
 import hev.htproxy.TProxyService
@@ -36,6 +37,7 @@ object NativeTunnelBridge {
             true
         } catch (e: UnsatisfiedLinkError) {
             log("bridge library failed to load: ${e.message}", isError = true)
+            logMemoryStats("native library load failure")
             false
         }
     }
@@ -105,6 +107,31 @@ object NativeTunnelBridge {
 
     fun stopUdpGateway() {
         if (libraryLoaded) nativeStopUdpGateway()
+    }
+
+    /**
+     * Records memory state at the moment of a native load failure - the
+     * "Out of memory" in a dlopen error is often misleading (an old-linker
+     * RELRO failure), so these numbers tell us whether the process really was
+     * near its limits at that instant.
+     */
+    private fun logMemoryStats(context: String) {
+        try {
+            val rt = Runtime.getRuntime()
+            val javaHeapMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
+            val javaMaxMb = rt.maxMemory() / (1024 * 1024)
+            val nativeAllocMb = Debug.getNativeHeapAllocatedSize() / (1024 * 1024)
+            val nativeSizeMb = Debug.getNativeHeapSize() / (1024 * 1024)
+            val pssMb = Debug.getPss() / 1024
+            log(
+                "memory at $context: javaHeap=${javaHeapMb}MB/javaMax=${javaMaxMb}MB " +
+                    "nativeHeap=${nativeAllocMb}MB/nativeReserved=${nativeSizeMb}MB " +
+                    "appPss=${pssMb}MB",
+                isError = true
+            )
+        } catch (t: Throwable) {
+            log("memory stats unavailable: ${t.message}", isError = true)
+        }
     }
 
     private fun log(message: String, isError: Boolean = false) {

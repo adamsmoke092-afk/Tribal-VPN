@@ -41,6 +41,9 @@ class SshTunnelService(
     private val ssh = SSHClient()
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
+
+    /** Port the SOCKS listener actually bound to (kernel-assigned). */
+    val socksPort: Int get() = serverSocket?.localPort ?: config.socksBindPort
     private val acceptExecutor = Executors.newCachedThreadPool()
 
     /**
@@ -94,7 +97,8 @@ class SshTunnelService(
         onLog(null, "SSH authenticated as ${config.username}@${config.host}", false)
 
         startSocksListener()
-        onLog(null, "SOCKS5 proxy opened on 127.0.0.1:${config.socksBindPort}", false)
+        // Log the port the kernel actually assigned, not the 0 sentinel.
+        onLog(null, "SOCKS5 proxy opened on 127.0.0.1:$socksPort", false)
     }
 
     private fun authenticate() {
@@ -124,6 +128,10 @@ class SshTunnelService(
     private fun startSocksListener() {
         val socket = ServerSocket()
         socket.reuseAddress = true
+        // Port 0 = let the kernel assign a free ephemeral port (no collision
+        // with another instance's listener). The bound port is read back
+        // below and exposed via socksPort so the relay config points at the
+        // real listener.
         socket.bind(InetSocketAddress("127.0.0.1", config.socksBindPort))
         serverSocket = socket
         running.set(true)
