@@ -1,7 +1,10 @@
 package com.tribal.vpn.vpn
 
+import android.content.Context
 import android.os.Debug
 import android.util.Log
+import com.tribal.vpn.data.AppSettingsRepository
+import com.tribal.vpn.diagnostics.Diagnostics
 import java.io.File
 import hev.htproxy.TProxyService
 
@@ -35,30 +38,71 @@ object NativeTunnelBridge {
      */
     private val VARIANTS = listOf("tribal_bridge_a", "tribal_bridge_b", "tribal_bridge_c")
 
-    private var libraryLoaded = false
-    private var loadedVariant: String? = null
+    @Volatile private var bootstrapped = false
+    @Volatile private var libraryLoaded = false
+    @Volatile private var loadedVariant: String? = null
 
-    init {
-        // EVERY variant is attempted so we learn which loads AND which
-        // doesn't; the first that loads is the one used (native externs
-        // resolve from the earliest-loaded library providing them). Each
-        // attempt is logged to the Activity log + durable log with the
-        // linker's own error text. A successful load also pulls in
-        // libhev-socks5-tunnel.so (DT_NEEDED dependency) and runs its
-        // JNI_OnLoad, registering natives onto hev.htproxy.TProxyService.
+    /** The variant whose successful load registered the natives in use. */
+    val activeVariant: String? get() = loadedVariant
+
+    /**
+     * Runs the variant cascade ONCE, explicitly from TribalVpnApp.onCreate
+     * (not from a class initializer - this needs a Context for the probe
+     * setting and the crash-skip store, and must run after
+     * Diagnostics.init, which owns the probe markers).
+     *
+     * Crash safety: a fsync'd marker is written before every
+     * System.loadLibrary and deleted after the load returns or throws.
+     * Only a process death DURING the load can leave it behind - and that
+     * is exactly the death no Java catch can see (linker abort, SIGSEGV
+     * inside JNI_OnLoad). The next launch records the killer variant and
+     * skips it for the rest of THIS install; the record dies with the
+     * install (PackageInfo.lastUpdateTime), so an app update re-tests
+     * every variant honestly.
+     */
+    fun bootstrap(context: Context) {
+        if (bootstrapped) return
+        bootstrapped = true
+
+        val probeAll = try {
+            AppSettingsRepository(context).probeAllVariants.value
+        } catch (_: Throwable) {
+            true // diagnostic build: default to learning the most
+        }
+
+        // A leftover marker = the previous launch died mid-load.
+        Diagnostics.consumeLeftoverLoadProbe()?.let { killer ->
+            Diagnostics.recordVariantCrash(killer)
+            log("variant $killer: crashed the process last time - recording and skipping", isError = true)
+        }
+        val crashed = Diagnostics.crashedVariants()
+
         for (variant in VARIANTS) {
+            if (variant in crashed) {
+                log("variant $variant: skipped (crashed the process this install)", isError = true)
+                continue
+            }
+            Diagnostics.beginLoadProbe(variant)
             try {
                 System.loadLibrary(variant)
-                loadedVariant = variant
+                if (loadedVariant == null) loadedVariant = variant
                 libraryLoaded = true
                 log("variant $variant: OK")
             } catch (e: UnsatisfiedLinkError) {
+                // Expected for b/c in release builds (debug-only modules
+                // there) - the FAIL line is honest, not a defect.
                 log("variant $variant: FAIL ${e.message}", isError = true)
+            } finally {
+                Diagnostics.endLoadProbe()
             }
+            if (libraryLoaded && !probeAll) break
         }
+
         if (loadedVariant == null) {
             log("all bridge variants failed to load - Phase 5 externs unavailable", isError = true)
             logMemoryStats("native library load failure")
+        } else if (probeAll) {
+            log("probe-all: first loadable variant was $loadedVariant - its natives are the ones in use")
         }
     }
 
@@ -77,6 +121,10 @@ object NativeTunnelBridge {
             log("startTunnel: bridge library not loaded - relay cannot start (tun_fd=$tunFd)", isError = true)
             return false
         }
+        log(
+            "startTunnel: natives in use are from variant ${loadedVariant ?: "none"} " +
+                "(hev's TProxy natives were registered at its first successful load)"
+        )
         // Config fields verified against upstream src/hev-config.c. udp 'tcp'
         // because the app's SOCKS5 server has no UDP ASSOCIATE - UDP is
         // Phase 5's job (badvpn-udpgw).
