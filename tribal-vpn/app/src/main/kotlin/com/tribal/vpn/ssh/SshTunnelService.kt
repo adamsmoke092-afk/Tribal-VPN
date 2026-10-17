@@ -90,10 +90,42 @@ class SshTunnelService(
         ssh.connectTimeout = config.connectTimeoutMs
 
         ssh.addHostKeyVerifier(PromiscuousVerifier()) // TODO: replace with known_hosts/TOFU pinning before production use
-        ssh.connect(config.host, config.port)
-        ssh.connection.keepAlive.keepAliveInterval = config.serverAliveIntervalSeconds
 
-        authenticate()
+        // 20s handshake watchdog: connect + key exchange + authentication
+        // must complete inside the window or the session is torn down, so a
+        // wedged handshake (filtered port, dead NAT mapping) fails fast and
+        // honestly instead of hanging CONNECTING forever. Disarmed the
+        // moment authentication completes (or the attempt fails on its
+        // own) - it never watches an established session.
+        val handshakeDone = AtomicBoolean(false)
+        val watchdog = Thread {
+            try {
+                Thread.sleep(HANDSHAKE_WATCHDOG_MS)
+                if (!handshakeDone.get()) {
+                    onLog(
+                        null,
+                        "SSH handshake watchdog: no authentication within " +
+                            "${HANDSHAKE_WATCHDOG_MS / 1000}s - aborting the session",
+                        true
+                    )
+                    try { ssh.disconnect() } catch (_: Exception) {}
+                }
+            } catch (_: InterruptedException) {
+                // Disarmed before the deadline - expected path.
+            }
+        }
+        watchdog.isDaemon = true
+        watchdog.start()
+
+        try {
+            ssh.connect(config.host, config.port)
+            ssh.connection.keepAlive.keepAliveInterval = config.serverAliveIntervalSeconds
+
+            authenticate()
+        } finally {
+            handshakeDone.set(true)
+            watchdog.interrupt()
+        }
         onLog(null, "SSH authenticated as ${config.username}@${config.host}", false)
 
         startSocksListener()
@@ -158,7 +190,17 @@ class SshTunnelService(
                     onLog(null, "SOCKS5 handshake failed for a client", true)
                 }
 
-            val channel: DirectConnection = ssh.newDirectConnection(destHost, destPort)
+            // One durable log line per CONNECT: where the relay wants to go,
+            // then whether the SSH direct-tcpip channel actually opened.
+            onLog(null, "SOCKS5 CONNECT $destHost:$destPort", false)
+            val channel: DirectConnection = try {
+                ssh.newDirectConnection(destHost, destPort)
+            } catch (e: Exception) {
+                onLog(null, "SOCKS5 $destHost:$destPort -> direct-tcpip FAILED: ${e.message}", true)
+                try { client.close() } catch (_: Exception) {}
+                return
+            }
+            onLog(null, "SOCKS5 $destHost:$destPort -> direct-tcpip open", false)
             Socks5Handshake.pipe(client, channel)
         } catch (e: Exception) {
             onLog(null, "SOCKS client relay error: ${e.message}", true)
@@ -179,4 +221,8 @@ class SshTunnelService(
 
     val isConnected: Boolean
         get() = ssh.isConnected && ssh.isAuthenticated
+
+    companion object {
+        private const val HANDSHAKE_WATCHDOG_MS = 20_000L
+    }
 }
