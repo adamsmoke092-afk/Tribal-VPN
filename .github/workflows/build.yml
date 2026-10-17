@@ -27,25 +27,33 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: "Build debug APK (ndk-build: hev-socks5-tunnel + tribal_tunnel_bridge)"
-        run: gradle :app:assembleDebug
+      - name: "Build + unit tests (ndk-build bridge variants a/b/c, VpnConfig/SOCKS5 JVM tests)"
+        run: gradle :app:assembleDebug :app:testDebugUnitTest
 
       - name: Report native ELF segments + APK lib compression
-        # Diagnostic only: it must never block the APK artifact from uploading,
-        # so failures here (missing path, grep no-match, no unzip) are ignored.
+        # Diagnostic only: it must never block the APK artifact from
+        # uploading, so failures here (path misses, grep no-match) are ignored.
         if: always()
         continue-on-error: true
         run: |
-          READELF="$(ls -d "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf | head -n1)"
-          for so in app/build/intermediates/merged_native_libs/debug/out/lib/arm64-v8a/*.so; do
+          READELF="$(ls -d "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf 2>/dev/null | head -n1)"
+          echo "readelf: ${READELF:-NOT FOUND}"
+          find app/build -type f -name '*.so' -path '*arm64-v8a*' | sort -u | while read -r so; do
             echo "=== $so ==="
-            "$READELF" -lW "$so" | grep -E 'GNU_RELRO|LOAD'
+            if [ -n "$READELF" ]; then
+              "$READELF" -lW "$so" | grep -E 'LOAD|GNU_RELRO' || echo '(no LOAD/RELRO lines)'
+            else
+              echo '(readelf not found)'
+            fi
           done
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          echo "=== lib entries in APK (Stored = uncompressed/page-aligned) ==="
-          unzip -v "$APK" | grep 'lib/'
+          APK="$(find app/build/outputs -name '*.apk' | head -n1)"
+          echo "=== lib entries in $APK (Stored = uncompressed/page-aligned) ==="
+          unzip -v "$APK" 2>/dev/null | grep 'lib/' || echo '(no lib entries found)'
 
       - name: Upload APK
+        # always(): a failing unit test turns the run red but must not stop
+        # the device-test APK from being available.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tribal-vpn-debug-apk

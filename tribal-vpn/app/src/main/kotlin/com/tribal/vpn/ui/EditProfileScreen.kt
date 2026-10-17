@@ -55,7 +55,6 @@ fun EditProfileScreen(
     var enableDns by remember { mutableStateOf(existing?.enableDns ?: true) }
     var preferredDns by remember { mutableStateOf(existing?.preferredDns ?: "8.8.8.8") }
     var alternateDns by remember { mutableStateOf(existing?.alternateDns ?: "8.8.4.4") }
-    var enableUdp by remember { mutableStateOf(existing?.enableUdp ?: false) }
     var udpPort by remember { mutableStateOf((existing?.udpGatewayPort ?: 7300).toString()) }
     var mtu by remember { mutableStateOf((existing?.mtu ?: 1400).toString()) }
 
@@ -70,17 +69,37 @@ fun EditProfileScreen(
         if (authMethod == VpnConfig.AuthMethod.PASSWORD && password.isBlank()) {
             e["password"] = "Password is required"
         }
+        // Port fields are validated, never silently defaulted: garbage in a
+        // box must show an error, not quietly become 22 / 7300 / 1400.
+        if (VpnConfig.parsePort(port) == null) {
+            e["port"] = "SSH port must be a number from 1 to 65535"
+        }
+        if (mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 } == null) {
+            e["mtu"] = "MTU must be a number from 68 to 65535"
+        }
+        if (VpnConfig.parsePort(udpPort) == null) {
+            e["udpPort"] = "udpgw port must be a number from 1 to 65535"
+        }
         errors = e
         return e.isEmpty()
     }
 
     fun save() {
         if (!validate()) return
+        // validate() already showed errors for anything unparseable - these
+        // guards exist so a default can NEVER be silently substituted, even
+        // if the fields somehow changed between validate() and here.
+        val portNum = VpnConfig.parsePort(port)
+            ?: run { errors = errors + ("port" to "SSH port must be a number from 1 to 65535"); return }
+        val mtuNum = mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 }
+            ?: run { errors = errors + ("mtu" to "MTU must be a number from 68 to 65535"); return }
+        val udpNum = VpnConfig.parsePort(udpPort)
+            ?: run { errors = errors + ("udpPort" to "udpgw port must be a number from 1 to 65535"); return }
         val config = VpnConfig(
             id = existing?.id ?: UUID.randomUUID().toString(),
             name = name.trim(),
             host = host.trim(),
-            port = port.toIntOrNull() ?: 22,
+            port = portNum,
             username = username.trim(),
             password = password,
             authMethod = authMethod,
@@ -88,9 +107,11 @@ fun EditProfileScreen(
             enableDns = enableDns,
             preferredDns = preferredDns.trim(),
             alternateDns = alternateDns.trim(),
-            enableUdp = enableUdp,
-            udpGatewayPort = udpPort.toIntOrNull() ?: 7300,
-            mtu = mtu.toIntOrNull() ?: 1400
+            // UDP Custom UI was removed as a fake toggle (the Phase 5 stub
+            // does nothing real); preserve whatever the profile stored.
+            enableUdp = existing?.enableUdp ?: false,
+            udpGatewayPort = udpNum,
+            mtu = mtuNum
         )
         viewModel.saveProfile(config)
         if (isNew) viewModel.setActiveProfile(config.id)
@@ -132,7 +153,7 @@ fun EditProfileScreen(
                     }
                 }
                 Box(Modifier.weight(1f)) {
-                    LabeledField("Port", null) {
+                    LabeledField("SSH Port (TCP)", errors["port"]) {
                         GoldTextField(port, { port = it }, keyboardType = KeyboardType.Number)
                     }
                 }
@@ -232,26 +253,20 @@ fun EditProfileScreen(
 
                 Divider(color = CardBorder)
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("UDP Custom", color = Color.White, fontSize = 13.sp)
-                        Text("Needs badvpn-udpgw on your VPS", color = MidGray, fontSize = 11.sp)
-                    }
-                    GoldSwitch(enableUdp) { enableUdp = it }
+                Column {
+                    Text("UDP Custom (udpgw)", color = Color.White, fontSize = 13.sp)
+                    Text(
+                        "Not implemented yet (Phase 5) - needs a udpgw server on your VPS",
+                        color = MidGray, fontSize = 11.sp
+                    )
                 }
-                if (enableUdp) {
-                    LabeledField("UDPGW Port", null) {
-                        GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)
-                    }
+                LabeledField("udpgw Port (saved for Phase 5, not used yet)", errors["udpPort"]) {
+                    GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)
                 }
 
                 Divider(color = CardBorder)
 
-                LabeledField("MTU", null) {
+                LabeledField("MTU", errors["mtu"]) {
                     GoldTextField(mtu, { mtu = it }, keyboardType = KeyboardType.Number)
                 }
             }

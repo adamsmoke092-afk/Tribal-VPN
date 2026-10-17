@@ -32,7 +32,10 @@ class ConfigRepository(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
-    private val json = Json { ignoreUnknownKeys = true }
+    // encodeDefaults=true: every field (including port=22, mtu, udpgw port)
+    // is written explicitly to disk, so a future default change can never
+    // silently rewrite old saved profiles.
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     private val _profiles = MutableStateFlow(loadProfiles())
     val profiles: StateFlow<List<VpnConfig>> = _profiles.asStateFlow()

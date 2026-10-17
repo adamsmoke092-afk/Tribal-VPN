@@ -33,4 +33,15 @@ data class VpnConfig(
             AuthMethod.KEY -> !privateKeyAlias.isNullOrBlank()
         }
     }
+
+    companion object {
+        /**
+         * Parses a port from free-text input. Returns null for anything that
+         * is not a clean integer in 1..65535 ("1-65535", "", "abc", "0",
+         * "65536") - callers must surface that as a validation error, never
+         * silently substitute a default like 22.
+         */
+        fun parsePort(raw: String): Int? =
+            raw.trim().toIntOrNull()?.takeIf { it in 1..65535 }
+    }
 }
