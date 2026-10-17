@@ -35,9 +35,13 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     val autoReconnect: StateFlow<Boolean> = settingsRepository.autoReconnect
     val requireBiometrics: StateFlow<Boolean> = settingsRepository.requireBiometrics
+    val probeAllVariants: StateFlow<Boolean> = settingsRepository.probeAllVariants
+    val bypassApps: StateFlow<List<String>> = settingsRepository.bypassApps
 
     fun setAutoReconnect(enabled: Boolean) = settingsRepository.setAutoReconnect(enabled)
     fun setRequireBiometrics(enabled: Boolean) = settingsRepository.setRequireBiometrics(enabled)
+    fun setProbeAllVariants(enabled: Boolean) = settingsRepository.setProbeAllVariants(enabled)
+    fun setBypassApps(apps: List<String>) = settingsRepository.setBypassApps(apps)
 
     val connectionState: StateFlow<TribalVpnService.ConnectionState> =
         TribalVpnService.connectionState

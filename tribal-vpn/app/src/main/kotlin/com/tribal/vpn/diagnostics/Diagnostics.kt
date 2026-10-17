@@ -26,6 +26,8 @@ object Diagnostics {
     private const val APP_LOG_OLD = "app_runtime_log.old.txt"
     private const val DIAG_REPORT = "last_run_diagnostics.txt"
     private const val RUNNING_MARKER = "running.marker"
+    private const val LOAD_PROBE_MARKER = "load_probe.marker"
+    private const val CRASHED_VARIANTS = "crashed_variants.txt"
     private const val APP_LOG_MAX_BYTES = 128 * 1024
     private const val LOGCAT_MAX_BYTES = 256 * 1024
 
@@ -37,9 +39,23 @@ object Diagnostics {
     var previousRunEndedAbnormally: Boolean = false
         private set
 
+    /**
+     * PackageInfo.lastUpdateTime of the current install. Native-load crash
+     * records are only valid for the install they were written in - an app
+     * update must re-test every variant, not inherit the old verdicts.
+     */
+    @Volatile
+    var installStamp: Long = 0L
+        private set
+
     /** Call from Application.onCreate - before anything else can die. */
     fun init(context: Context) {
         filesDir = context.filesDir
+        installStamp = try {
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+        } catch (_: Throwable) {
+            0L
+        }
         previousRunEndedAbnormally = try {
             File(filesDir, RUNNING_MARKER).exists()
         } catch (_: Throwable) {
@@ -99,6 +115,98 @@ object Diagnostics {
             filesDir?.let { File(it, RUNNING_MARKER).delete() }
         } catch (_: Throwable) {
             // Diagnostics must never crash the app.
+        }
+    }
+
+    // --- #5 native-load probe markers (crash-safe variant cascade) -------
+
+    /**
+     * A load-probe marker can only be left behind when the process dies
+     * BETWEEN beginLoadProbe() and endLoadProbe() - i.e. System.loadLibrary
+     * killed the process (linker abort, SIGSEGV inside JNI_OnLoad), which
+     * no Java catch can intercept. The leftover marker is how the next
+     * launch knows which variant did it. Consuming deletes the marker.
+     */
+    fun consumeLeftoverLoadProbe(): String? {
+        val dir = filesDir ?: return null
+        return try {
+            val marker = File(dir, LOAD_PROBE_MARKER)
+            if (!marker.exists()) return null
+            val variant = marker.readText().trim()
+            marker.delete()
+            variant.ifEmpty { null }
+        } catch (_: Throwable) {
+            // Diagnostics must never crash the app.
+            null
+        }
+    }
+
+    /** Write + fsync BEFORE System.loadLibrary - best-effort, never throws. */
+    fun beginLoadProbe(variant: String) {
+        val dir = filesDir ?: return
+        try {
+            FileOutputStream(File(dir, LOAD_PROBE_MARKER)).use { out ->
+                out.write(variant.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+        } catch (_: Throwable) {
+            // Diagnostics must never crash the app.
+        }
+    }
+
+    /** Delete AFTER the load returns or throws (call from finally). */
+    fun endLoadProbe() {
+        try {
+            filesDir?.let { File(it, LOAD_PROBE_MARKER).delete() }
+        } catch (_: Throwable) {
+            // Diagnostics must never crash the app.
+        }
+    }
+
+    /**
+     * Records "this variant killed the process during THIS install". A
+     * skip stays in force only while PackageInfo.lastUpdateTime is
+     * unchanged - an app update wipes the verdicts so every variant is
+     * re-tested honestly instead of inheriting the old result.
+     */
+    fun recordVariantCrash(variant: String) {
+        val dir = filesDir ?: return
+        try {
+            FileOutputStream(File(dir, CRASHED_VARIANTS), true).use { out ->
+                out.write("$installStamp $variant\n".toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+        } catch (_: Throwable) {
+            // Diagnostics must never crash the app.
+        }
+    }
+
+    /**
+     * Variants that crashed a previous launch of THIS install.
+     * Stale-stamp entries are dropped from the file as a side effect,
+     * which is what un-skips all variants after an app update.
+     */
+    fun crashedVariants(): Set<String> {
+        val dir = filesDir ?: return emptySet()
+        return try {
+            val file = File(dir, CRASHED_VARIANTS)
+            if (!file.exists()) return emptySet()
+            val entries = mutableListOf<Pair<Long, String>>()
+            for (line in file.readLines()) {
+                val idx = line.indexOf(' ')
+                if (idx <= 0) continue
+                val stamp = line.substring(0, idx).toLongOrNull() ?: continue
+                val name = line.substring(idx + 1).trim()
+                if (name.isNotEmpty()) entries.add(stamp to name)
+            }
+            entries.removeAll { it.first != installStamp }
+            file.writeText(entries.joinToString("") { "${it.first} ${it.second}\n" })
+            entries.map { it.second }.toSet()
+        } catch (_: Throwable) {
+            // Diagnostics must never crash the app.
+            emptySet()
         }
     }
 

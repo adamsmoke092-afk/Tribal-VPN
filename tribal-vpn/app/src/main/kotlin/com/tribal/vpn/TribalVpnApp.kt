@@ -36,10 +36,11 @@ class TribalVpnApp : Application() {
             // If this fails, SSH fails honestly at key exchange instead.
         }
 
-        // Force the bridge variant cascade at startup (NativeTunnelBridge's
-        // object init): the Activity log then records which variants load on
-        // this device before any connect attempt is possible.
-        NativeTunnelBridge.isAvailable
+        // Run the crash-safe bridge variant cascade at startup: the Activity
+        // log then records which variants load on this device - and which
+        // one crashed a previous launch - before any connect attempt. Must
+        // run after Diagnostics.init (the cascade uses its probe markers).
+        NativeTunnelBridge.bootstrap(this)
 
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->

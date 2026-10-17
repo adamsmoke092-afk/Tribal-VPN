@@ -9,6 +9,9 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -42,6 +45,9 @@ fun AppSettingsScreen(
     appVersion: String = "1.0.0"
 ) {
     val autoReconnect by viewModel.autoReconnect.collectAsStateWithLifecycle()
+    val probeAllVariants by viewModel.probeAllVariants.collectAsStateWithLifecycle()
+    val bypassApps by viewModel.bypassApps.collectAsStateWithLifecycle()
+    var newBypassApp by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -77,6 +83,15 @@ fun AppSettingsScreen(
                 }
             }
             SettingsRow(
+                icon = Icons.Filled.BugReport,
+                title = "Probe all bridge variants",
+                subtitle = "(Diagnostic) Try every bridge .so variant at startup and log each result. " +
+                    "Off = stop at the first that loads. Variants that crashed the process are " +
+                    "skipped until the app updates."
+            ) {
+                GoldSwitchStandalone(probeAllVariants) { viewModel.setProbeAllVariants(it) }
+            }
+            SettingsRow(
                 icon = Icons.Filled.Lock,
                 title = "Require biometrics",
                 subtitle = "Not yet implemented — will lock saved passwords behind Face/Fingerprint"
@@ -89,6 +104,68 @@ fun AppSettingsScreen(
         }
 
         Spacer(Modifier.height(12.dp))
+
+        SettingsGroup {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(top = 12.dp)
+            ) {
+                Text(
+                    "Bypassed apps (excluded from the VPN)",
+                    color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium
+                )
+                Text(
+                    "These apps keep the phone's normal connection, applied via " +
+                        "addDisallowedApplication when connecting. Unknown packages are " +
+                        "logged, never silently dropped.",
+                    color = MidGray, fontSize = 11.sp
+                )
+            }
+            bypassApps.forEach { pkg ->
+                SettingsRow(icon = Icons.Filled.Apps, title = pkg, subtitle = "") {
+                    IconButton(onClick = { viewModel.setBypassApps(bypassApps - pkg) }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Remove $pkg", tint = Color(0xFFCF4A4A))
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = newBypassApp,
+                    onValueChange = { newBypassApp = it },
+                    placeholder = { Text("com.example.app", color = MidGray) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Gold,
+                        unfocusedBorderColor = CardBorder,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        cursorColor = Gold
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        val pkg = newBypassApp.trim()
+                        if (pkg.isNotEmpty() && pkg !in bypassApps) {
+                            viewModel.setBypassApps(bypassApps + pkg)
+                        }
+                        newBypassApp = ""
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Gold, contentColor = Black)
+                ) {
+                    Text("Add", fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
 
         SettingsGroup {
             SettingsRow(icon = Icons.Filled.Info, title = "About Tribal VPN", subtitle = "v$appVersion") {

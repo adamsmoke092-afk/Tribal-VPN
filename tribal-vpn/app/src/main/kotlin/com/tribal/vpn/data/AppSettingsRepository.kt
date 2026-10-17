@@ -28,6 +28,19 @@ class AppSettingsRepository(context: Context) {
     private val _requireBiometrics = MutableStateFlow(prefs.getBoolean(KEY_BIOMETRIC_LOCK, true))
     val requireBiometrics: StateFlow<Boolean> = _requireBiometrics.asStateFlow()
 
+    // Bypassed apps are applied via VpnService.Builder.addDisallowedApplication
+    // at connect time (TribalVpnService): their traffic keeps the phone's
+    // normal connection instead of going through the tunnel. Default is
+    // Termux itself so the shell used for debugging never gets blackholed.
+    private val _bypassApps = MutableStateFlow(readBypassApps())
+    val bypassApps: StateFlow<List<String>> = _bypassApps.asStateFlow()
+
+    // (Diagnostic build) Try every bridge .so variant at startup and log
+    // each result; off = stop at the first variant that loads. Default ON
+    // while the Android 8.1 RELRO question is open.
+    private val _probeAllVariants = MutableStateFlow(prefs.getBoolean(KEY_PROBE_ALL_VARIANTS, true))
+    val probeAllVariants: StateFlow<Boolean> = _probeAllVariants.asStateFlow()
+
     fun setAutoReconnect(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_AUTO_RECONNECT, enabled).apply()
         _autoReconnect.value = enabled
@@ -38,8 +51,27 @@ class AppSettingsRepository(context: Context) {
         _requireBiometrics.value = enabled
     }
 
+    fun setBypassApps(apps: List<String>) {
+        prefs.edit().putString(KEY_BYPASS_APPS, apps.joinToString(",")).apply()
+        _bypassApps.value = apps
+    }
+
+    fun setProbeAllVariants(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_PROBE_ALL_VARIANTS, enabled).apply()
+        _probeAllVariants.value = enabled
+    }
+
+    private fun readBypassApps(): List<String> {
+        val raw = prefs.getString(KEY_BYPASS_APPS, null)
+            ?: return listOf(DEFAULT_BYPASS_APP)
+        return raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
     companion object {
         private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val KEY_BIOMETRIC_LOCK = "require_biometrics"
+        private const val KEY_PROBE_ALL_VARIANTS = "probe_all_variants"
+        private const val KEY_BYPASS_APPS = "bypass_apps"
+        private const val DEFAULT_BYPASS_APP = "com.termux"
     }
 }
