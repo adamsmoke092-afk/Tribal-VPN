@@ -2,6 +2,7 @@ package com.tribal.vpn
 
 import android.app.Application
 import com.tribal.vpn.diagnostics.Diagnostics
+import com.tribal.vpn.vpn.NativeTunnelBridge
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.File
 import java.security.Security
@@ -34,6 +35,11 @@ class TribalVpnApp : Application() {
         } catch (_: Throwable) {
             // If this fails, SSH fails honestly at key exchange instead.
         }
+
+        // Force the bridge variant cascade at startup (NativeTunnelBridge's
+        // object init): the Activity log then records which variants load on
+        // this device before any connect attempt is possible.
+        NativeTunnelBridge.isAvailable
 
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->

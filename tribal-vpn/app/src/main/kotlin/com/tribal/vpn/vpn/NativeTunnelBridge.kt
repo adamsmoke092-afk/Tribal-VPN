@@ -27,18 +27,38 @@ object NativeTunnelBridge {
 
     private const val TAG = "TribalTunnelBridge"
 
+    /**
+     * Ordered diagnostic variants of the bridge .so (built in Android.mk):
+     * a = current bridge, default link flags; b = same source with RELRO
+     * disabled; c = the full pre-81fdf0b bridge. This build exists to learn
+     * which of them loads on the Android 8.1 phone.
+     */
+    private val VARIANTS = listOf("tribal_bridge_a", "tribal_bridge_b", "tribal_bridge_c")
+
     private var libraryLoaded = false
+    private var loadedVariant: String? = null
 
     init {
-        libraryLoaded = try {
-            // Also loads libhev-socks5-tunnel.so (dependency) and runs its
-            // JNI_OnLoad, registering natives onto hev.htproxy.TProxyService.
-            System.loadLibrary("tribal_tunnel_bridge")
-            true
-        } catch (e: UnsatisfiedLinkError) {
-            log("bridge library failed to load: ${e.message}", isError = true)
+        // EVERY variant is attempted so we learn which loads AND which
+        // doesn't; the first that loads is the one used (native externs
+        // resolve from the earliest-loaded library providing them). Each
+        // attempt is logged to the Activity log + durable log with the
+        // linker's own error text. A successful load also pulls in
+        // libhev-socks5-tunnel.so (DT_NEEDED dependency) and runs its
+        // JNI_OnLoad, registering natives onto hev.htproxy.TProxyService.
+        for (variant in VARIANTS) {
+            try {
+                System.loadLibrary(variant)
+                loadedVariant = variant
+                libraryLoaded = true
+                log("variant $variant: OK")
+            } catch (e: UnsatisfiedLinkError) {
+                log("variant $variant: FAIL ${e.message}", isError = true)
+            }
+        }
+        if (loadedVariant == null) {
+            log("all bridge variants failed to load - Phase 5 externs unavailable", isError = true)
             logMemoryStats("native library load failure")
-            false
         }
     }
 
