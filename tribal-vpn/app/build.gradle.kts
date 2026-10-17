@@ -43,6 +43,20 @@ android {
         }
     }
 
+    buildTypes {
+        // Debug (this diagnostic APK) additionally builds bridge variants
+        // b and c: Android.mk gates them on TRIBAL_DIAG_VARIANTS=1. Release
+        // passes nothing, so it builds variant a only and the RELRO-disabled
+        // (-Wl,-z,norelro) bridge can never reach a release build.
+        getByName("debug") {
+            externalNativeBuild {
+                ndkBuild {
+                    arguments += listOf("TRIBAL_DIAG_VARIANTS=1")
+                }
+            }
+        }
+    }
+
     packaging {
         jniLibs {
             // extractNativeLibs=true: the Android 8.x linker fails dlopen

@@ -37,6 +37,15 @@ LOCAL_LDFLAGS := $(BRIDGE_LDFLAGS)
 LOCAL_SHARED_LIBRARIES := hev-socks5-tunnel
 include $(BUILD_SHARED_LIBRARY)
 
+# --- Diagnostic variants: DEBUG BUILDS ONLY -------------------------------
+# TRIBAL_DIAG_VARIANTS=1 is passed only for the debug buildType in
+# app/build.gradle.kts. A release build (or a bare `ndk-build` invocation)
+# never defines it, so variants b/c do not exist there at all and
+# -Wl,-z,norelro is structurally unable to reach a release build. The CI
+# dry-run gate greps the release-parity parse for "norelro" and fails if
+# it ever shows up. Variant A alone carries the relay in release builds.
+ifeq ($(TRIBAL_DIAG_VARIANTS),1)
+
 # --- Variant B: same source, RELRO disabled (diagnostic) ------------------
 include $(CLEAR_VARS)
 LOCAL_PATH := $(CPP_PATH)
@@ -58,3 +67,5 @@ LOCAL_LDLIBS := $(BRIDGE_LDLIBS)
 LOCAL_LDFLAGS := $(BRIDGE_LDFLAGS)
 LOCAL_SHARED_LIBRARIES := hev-socks5-tunnel
 include $(BUILD_SHARED_LIBRARY)
+
+endif
