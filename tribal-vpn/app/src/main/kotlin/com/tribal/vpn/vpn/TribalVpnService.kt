@@ -158,6 +158,30 @@ class TribalVpnService : VpnService() {
                     }
                 }
 
+                // Bypass list: these apps keep the phone's normal connection
+                // (VpnService.Builder.addDisallowedApplication). An unknown
+                // package is logged honestly - never silently ignored and
+                // never faked as applied.
+                val bypass = appSettings.bypassApps.value
+                if (bypass.isNotEmpty()) {
+                    for (pkg in bypass) {
+                        try {
+                            builder.addDisallowedApplication(pkg)
+                        } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+                            appendLog(
+                                null,
+                                "Bypass app '$pkg' is not installed - skipped",
+                                isError = true
+                            )
+                        }
+                    }
+                    appendLog(
+                        null,
+                        "Bypassing ${bypass.size} app(s) via addDisallowedApplication: " +
+                            bypass.joinToString()
+                    )
+                }
+
                 vpnInterface = builder.establish()
 
                 if (vpnInterface == null) {
