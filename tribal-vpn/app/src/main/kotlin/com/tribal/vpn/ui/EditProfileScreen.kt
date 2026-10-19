@@ -58,6 +58,10 @@ fun EditProfileScreen(
     var udpPort by remember { mutableStateOf((existing?.udpGatewayPort ?: 7300).toString()) }
     var mtu by remember { mutableStateOf((existing?.mtu ?: 1400).toString()) }
 
+    var enableMapDns by remember { mutableStateOf(existing?.enableMapDns ?: true) }
+    var mapDnsNetwork by remember { mutableStateOf(existing?.mapDnsNetwork ?: "198.18.0.0") }
+    var mapDnsNetmask by remember { mutableStateOf(existing?.mapDnsNetmask ?: "255.254.0.0") }
+
     var showAdvanced by remember { mutableStateOf(false) }
     var errors by remember { mutableStateOf(emptyMap<String, String>()) }
 
@@ -80,6 +84,19 @@ fun EditProfileScreen(
         if (VpnConfig.parsePort(udpPort) == null) {
             e["udpPort"] = "udpgw port must be a number from 1 to 65535"
         }
+        // MapDNS needs exactly one DNS address to intercept, and a valid
+        // contiguous fake-IP pool - validated, never silently defaulted.
+        if (enableMapDns) {
+            if (!enableDns) {
+                e["enableMapDns"] = "MapDNS needs Custom DNS enabled above (one DNS address)"
+            }
+            if (VpnConfig.parseIPv4(mapDnsNetwork) == null) {
+                e["mapDnsNetwork"] = "Fake-IP pool base must be a valid IPv4 address"
+            }
+            if (VpnConfig.parseNetmask(mapDnsNetmask) == null) {
+                e["mapDnsNetmask"] = "Netmask must be contiguous, e.g. 255.254.0.0"
+            }
+        }
         errors = e
         return e.isEmpty()
     }
@@ -95,6 +112,19 @@ fun EditProfileScreen(
             ?: run { errors = errors + ("mtu" to "MTU must be a number from 68 to 65535"); return }
         val udpNum = VpnConfig.parsePort(udpPort)
             ?: run { errors = errors + ("udpPort" to "udpgw port must be a number from 1 to 65535"); return }
+        // Re-guards, same no-silent-default rule as the fields above.
+        if (enableMapDns && !enableDns) {
+            errors = errors + ("enableMapDns" to "MapDNS needs Custom DNS enabled above (one DNS address)")
+            return
+        }
+        if (enableMapDns && VpnConfig.parseIPv4(mapDnsNetwork) == null) {
+            errors = errors + ("mapDnsNetwork" to "Fake-IP pool base must be a valid IPv4 address")
+            return
+        }
+        if (enableMapDns && VpnConfig.parseNetmask(mapDnsNetmask) == null) {
+            errors = errors + ("mapDnsNetmask" to "Netmask must be contiguous, e.g. 255.254.0.0")
+            return
+        }
         val config = VpnConfig(
             id = existing?.id ?: UUID.randomUUID().toString(),
             name = name.trim(),
@@ -111,7 +141,10 @@ fun EditProfileScreen(
             // does nothing real); preserve whatever the profile stored.
             enableUdp = existing?.enableUdp ?: false,
             udpGatewayPort = udpNum,
-            mtu = mtuNum
+            mtu = mtuNum,
+            enableMapDns = enableMapDns,
+            mapDnsNetwork = mapDnsNetwork.trim(),
+            mapDnsNetmask = mapDnsNetmask.trim()
         )
         viewModel.saveProfile(config)
         if (isNew) viewModel.setActiveProfile(config.id)
@@ -253,6 +286,46 @@ fun EditProfileScreen(
 
                 Divider(color = CardBorder)
 
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("MapDNS (DNS without UDP)", color = Color.White, fontSize = 13.sp)
+                        Text(
+                            "Answers DNS on-device with fake IPs; real lookups happen " +
+                                "server-side over the SSH channel",
+                            color = MidGray, fontSize = 11.sp
+                        )
+                    }
+                    GoldSwitch(enableMapDns) { enableMapDns = it }
+                }
+                errors["enableMapDns"]?.let {
+                    Text(it, color = ErrorRed, fontSize = 11.sp)
+                }
+                if (enableMapDns) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Box(Modifier.weight(1f)) {
+                            LabeledField("Fake-IP pool base", errors["mapDnsNetwork"]) {
+                                GoldTextField(mapDnsNetwork, { mapDnsNetwork = it })
+                            }
+                        }
+                        Box(Modifier.weight(1f)) {
+                            LabeledField("Pool netmask", errors["mapDnsNetmask"]) {
+                                GoldTextField(mapDnsNetmask, { mapDnsNetmask = it })
+                            }
+                        }
+                    }
+                    Text(
+                        "Default 198.18.0.0/15 is a reserved test range - fake-IP " +
+                            "leaks are detected against this pool",
+                        color = MidGray, fontSize = 11.sp
+                    )
+                }
+
+                Divider(color = CardBorder)
+
                 Column {
                     Text("UDP Custom (udpgw)", color = Color.White, fontSize = 13.sp)
                     Text(
@@ -260,7 +333,7 @@ fun EditProfileScreen(
                         color = MidGray, fontSize = 11.sp
                     )
                 }
-                LabeledField("udpgw Port (saved for Phase 5, not used yet)", errors["udpPort"]) {
+                LabeledField("udpgw Port (used by the Phase 5 udpgw probe)", errors["udpPort"]) {
                     GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)
                 }
 
