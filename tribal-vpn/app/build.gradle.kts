@@ -44,10 +44,10 @@ android {
     }
 
     buildTypes {
-        // Debug (this diagnostic APK) additionally builds bridge variants
-        // b and c: Android.mk gates them on TRIBAL_DIAG_VARIANTS=1. Release
-        // passes nothing, so it builds variant a only and the RELRO-disabled
-        // (-Wl,-z,norelro) bridge can never reach a release build.
+        // Variants a (RELRO on) and b (RELRO disabled) ship in every
+        // build - b is the fallback for old linkers that fail RELRO
+        // (verified on the Android 8.1 target). This flag adds only the
+        // debug-only diagnostic archive, variant c, in debug builds.
         getByName("debug") {
             externalNativeBuild {
                 ndkBuild {

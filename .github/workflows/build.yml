@@ -27,13 +27,13 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: "Gate: ndk-build module-graph dry-runs (release-parity + diagnostic)"
+      - name: "Gate: ndk-build module-graph dry-runs (release a->b cascade + diagnostic)"
         # Runs BEFORE Gradle, after checkout (it needs the hev submodule
         # sources to parse). Standalone ndk-build dry-runs validate the
-        # module graph for both configurations and hard-fail if the
-        # release-parity parse ever contains norelro or a debug-only
-        # variant. NDK 26.1.10909125 is AGP 8.5.1's default - installing
-        # it here also pre-warms Gradle's own auto-install.
+        # release bridge policy: a + b + hev present, debug-only c absent,
+        # and every norelro line belongs to variant b (a keeps RELRO on).
+        # NDK 26.1.10909125 is AGP 8.5.1's default - installing it here
+        # also pre-warms Gradle's own auto-install.
         run: |
           NDKBUILD="$(ls -d "$ANDROID_HOME"/ndk/*/ndk-build 2>/dev/null | head -n1 || true)"
           if [ -z "$NDKBUILD" ]; then
@@ -54,29 +54,40 @@ jobs:
             exit 1
           }
           dry NDK_DEBUG=0 > dry_release.txt 2>&1 || dump_and_die dry_release.txt
-          if grep -q norelro dry_release.txt; then
-            echo "FATAL: -Wl,-z,norelro reached the release-parity parse"
+          if grep -q "tribal_bridge_c" dry_release.txt; then
+            echo "FATAL: debug-only variant c exists in the release-parity parse"
             dump_and_die dry_release.txt
           fi
-          if grep -q tribal_bridge_b dry_release.txt || grep -q tribal_bridge_c dry_release.txt; then
-            echo "FATAL: a debug-only variant exists in the release-parity parse"
-            dump_and_die dry_release.txt
-          fi
-          grep -q libtribal_bridge_a.so dry_release.txt || {
+          grep -q "libtribal_bridge_a.so" dry_release.txt || {
             echo "FATAL: variant a missing from the release-parity parse"
             dump_and_die dry_release.txt
           }
-          grep -q libhev-socks5-tunnel.so dry_release.txt || {
+          grep -q "libtribal_bridge_b.so" dry_release.txt || {
+            echo "FATAL: RELRO fallback variant b missing from the release-parity parse"
+            dump_and_die dry_release.txt
+          }
+          grep -q "libhev-socks5-tunnel.so" dry_release.txt || {
             echo "FATAL: hev-socks5-tunnel module missing (submodule checkout?)"
             dump_and_die dry_release.txt
           }
-          dry NDK_DEBUG=0 TRIBAL_DIAG_VARIANTS=1 > dry_debug.txt 2>&1 || dump_and_die dry_debug.txt
-          if ! grep -q tribal_bridge_b dry_debug.txt || ! grep -q tribal_bridge_c dry_debug.txt; then
-            echo "FATAL: b/c missing from the diagnostic parse"
-            dump_and_die dry_debug.txt
+          echo "=== norelro lines in the release-parity parse ==="
+          grep "norelro" dry_release.txt || {
+            echo "FATAL: no norelro line - variant b lost its RELRO-disable flag"
+            dump_and_die dry_release.txt
+          }
+          if grep "norelro" dry_release.txt | grep -qv "libtribal_bridge_b.so"; then
+            echo "FATAL: a norelro line does not name libtribal_bridge_b.so"
+            dump_and_die dry_release.txt
           fi
+          dry NDK_DEBUG=0 TRIBAL_DIAG_VARIANTS=1 > dry_debug.txt 2>&1 || dump_and_die dry_debug.txt
+          for m in tribal_bridge_a tribal_bridge_b tribal_bridge_c; do
+            grep -q "$m" dry_debug.txt || {
+              echo "FATAL: $m missing from the diagnostic parse"
+              dump_and_die dry_debug.txt
+            }
+          done
           dry NDK_DEBUG=1 > dry_ndkdebug.txt 2>&1 || dump_and_die dry_ndkdebug.txt
-          echo "GATE PASSED: release parse = variant a only (no norelro); diagnostic parse = a+b+c"
+          echo "GATE PASSED: release = a + b (b carries norelro), no c; diagnostic = a+b+c"
 
       - name: "Build + unit tests (ndk-build bridge variants a/b/c, VpnConfig/SOCKS5 JVM tests)"
         run: gradle :app:assembleDebug :app:testDebugUnitTest
