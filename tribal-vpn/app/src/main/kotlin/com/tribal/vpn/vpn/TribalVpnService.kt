@@ -149,6 +149,15 @@ class TribalVpnService : VpnService() {
                             "MapDNS netmask '${config.mapDnsNetmask}' is not a contiguous mask - edit the profile"
                         )
                 }
+                // UDP Custom port range: validated honestly like the mapdns
+                // pool - a corrupt profile fails the connect with a clear
+                // message, never a silent fix. The direct-route probe
+                // samples from it; the future UDP client picks its port
+                // from it.
+                val udpPortRange = VpnConfig.parsePortRange(config.udpPortRange)
+                    ?: throw IllegalStateException(
+                        "UDP port range '${config.udpPortRange}' is not a port or lo-hi range - edit the profile"
+                    )
                 val sshConfig = com.tribal.vpn.ssh.SshConfig(
                     host = config.host,
                     port = config.port,
@@ -157,7 +166,8 @@ class TribalVpnService : VpnService() {
                     privateKeyAlias = if (config.authMethod == VpnConfig.AuthMethod.KEY) config.privateKeyAlias else null,
                     mapDnsNetwork = mapDnsNetwork,
                     mapDnsNetmask = mapDnsNetmask,
-                    udpgwPort = config.udpGatewayPort
+                    udpgwPort = config.udpGatewayPort,
+                    udpPortRange = udpPortRange
                 )
                 val sshTunnel = com.tribal.vpn.ssh.SshTunnelService(
                     config = sshConfig,

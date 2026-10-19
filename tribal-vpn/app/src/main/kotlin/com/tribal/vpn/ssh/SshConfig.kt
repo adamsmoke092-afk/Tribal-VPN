@@ -26,5 +26,9 @@ data class SshConfig(
     val mapDnsNetmask: Int = 0,
     // Port the Phase 5 udpgw probe targets on the SSH host's loopback
     // (passed from VpnConfig.udpGatewayPort; 7300 is badvpn-udpgw's default).
-    val udpgwPort: Int = 7300
+    val udpgwPort: Int = 7300,
+    // UDP Custom port range (parsed from VpnConfig.udpPortRange by
+    // TribalVpnService): the direct-route probe samples ports from this
+    // range against the SSH host - the HTTP Custom redirect mechanism.
+    val udpPortRange: IntRange = 1..65535
 )

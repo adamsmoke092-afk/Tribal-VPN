@@ -49,6 +49,11 @@ class SshTunnelService(
     @Volatile
     var udpgwReachableViaSsh: Boolean? = null
         private set
+
+    /** Phase 5 probe result: direct-route ports that accepted a connection. */
+    @Volatile
+    var directRouteOpenPorts: List<Int> = emptyList()
+        private set
     private val acceptExecutor = Executors.newCachedThreadPool()
 
     // Rate-limited refusal logging: hev retries its UDP channel relentlessly
@@ -164,6 +169,69 @@ class SshTunnelService(
                     false
                 )
             }
+        }.apply { isDaemon = true }.start()
+
+        // Phase 5 direct-route probe (the other half of the evidence
+        // pair): HTTP Custom's UDP actually rides a DIRECT TCP socket
+        // from the phone to VPS:port-from-range (the provider
+        // iptables-redirects the range to udpgw). The probe above tested
+        // the encrypted-session route; this one samples the saved range
+        // directly, HTTP Custom style. A handful of ports only - any
+        // port covered by the redirect answers the same way, and 65k
+        // connects would hammer the provider. Informational only, it
+        // never affects the connection state; the udpgw client decision
+        // still waits for the probe evidence.
+        Thread {
+            val samples =
+                directUdpProbePorts(config.udpPortRange, config.udpgwPort, config.port)
+            if (samples.isEmpty()) {
+                onLog(
+                    null,
+                    "udp direct-route probe: skipped - the saved range has " +
+                        "no ports to sample (it only contains the SSH port)",
+                    false
+                )
+                return@Thread
+            }
+            val opened = mutableListOf<Int>()
+            for (port in samples) {
+                val socket = Socket()
+                try {
+                    // Same fd rules as the SSH socket itself: bind(null)
+                    // forces fd creation so protect() marks a real fd, and
+                    // protect() keeps the probe out of the tun - it must
+                    // reach the VPS the direct way, not loop through the
+                    // tunnel it is measuring.
+                    socket.bind(null)
+                    if (!protectSocket(socket)) {
+                        throw IOException(
+                            "VpnService.protect() failed - refusing to " +
+                                "probe $port (would loop into the tunnel)"
+                        )
+                    }
+                    socket.connect(
+                        InetSocketAddress(config.host, port),
+                        DIRECT_PROBE_TIMEOUT_MS
+                    )
+                    opened.add(port)
+                    onLog(
+                        null,
+                        "udp direct-route probe: ${config.host}:$port opened - " +
+                            "the redirect path answers (HTTP Custom style)",
+                        false
+                    )
+                } catch (t: Throwable) {
+                    onLog(
+                        null,
+                        "udp direct-route probe: ${config.host}:$port failed - " +
+                            "${t.javaClass.simpleName}: ${t.message}",
+                        false
+                    )
+                } finally {
+                    try { socket.close() } catch (_: Exception) {}
+                }
+            }
+            directRouteOpenPorts = opened
         }.apply { isDaemon = true }.start()
 
         startSocksListener()
@@ -300,5 +368,28 @@ class SshTunnelService(
 
     companion object {
         private const val HANDSHAKE_WATCHDOG_MS = 20_000L
+        private const val DIRECT_PROBE_TIMEOUT_MS = 5_000
     }
+}
+
+/**
+ * Ports sampled for the direct-route probe: the udpgw port (when it falls
+ * inside the range) plus three spread across the saved range. A redirect
+ * rule covers whole ranges, so any covered port answers identically - a
+ * handful proves or disproves the path without 65k connects. The SSH
+ * port is excluded: connecting to it would reach sshd, not the redirect,
+ * and would read as a false positive.
+ */
+internal fun directUdpProbePorts(
+    range: IntRange,
+    udpgwPort: Int,
+    sshPort: Int
+): List<Int> {
+    val span = range.last - range.first
+    val samples = linkedSetOf<Int>()
+    if (udpgwPort in range && udpgwPort != sshPort) samples.add(udpgwPort)
+    for (candidate in listOf(range.first, range.first + span / 2, range.last)) {
+        if (candidate != sshPort) samples.add(candidate)
+    }
+    return samples.toList()
 }
