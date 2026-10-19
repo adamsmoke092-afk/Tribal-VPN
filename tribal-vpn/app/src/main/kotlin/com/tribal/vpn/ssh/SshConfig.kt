@@ -16,5 +16,15 @@ data class SshConfig(
     // fed to the relay config, so two instances can never collide on 1080.
     val socksBindPort: Int = 0,
     val serverAliveIntervalSeconds: Int = 15,
-    val connectTimeoutMs: Int = 10_000
+    val connectTimeoutMs: Int = 10_000,
+    // MapDNS fake-IP pool for leak detection (netmask 0 = detection off):
+    // a CONNECT targeting an address inside this range means hev's reverse
+    // mapping did not fire and the connection would die at the SSH server.
+    // Parsed by TribalVpnService from VpnConfig so this layer never touches
+    // the data model.
+    val mapDnsNetwork: Int = 0,
+    val mapDnsNetmask: Int = 0,
+    // Port the Phase 5 udpgw probe targets on the SSH host's loopback
+    // (passed from VpnConfig.udpGatewayPort; 7300 is badvpn-udpgw's default).
+    val udpgwPort: Int = 7300
 )

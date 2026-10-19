@@ -44,7 +44,17 @@ class SshTunnelService(
 
     /** Port the SOCKS listener actually bound to (kernel-assigned). */
     val socksPort: Int get() = serverSocket?.localPort ?: config.socksBindPort
+
+    /** Phase 5 probe result: udpgw reachable on the SSH host's loopback? */
+    @Volatile
+    var udpgwReachableViaSsh: Boolean? = null
+        private set
     private val acceptExecutor = Executors.newCachedThreadPool()
+
+    // Rate-limited refusal logging: hev retries its UDP channel relentlessly
+    // while UDP is unsupported, and every durable log line is fsync'd - one
+    // line per refusal would churn the log and drown real events.
+    private val refusals = Socks5Refusals { line -> onLog(null, line, false) }
 
     /**
      * Connects, authenticates, and starts accepting local SOCKS5 clients.
@@ -128,6 +138,34 @@ class SshTunnelService(
         }
         onLog(null, "SSH authenticated as ${config.username}@${config.host}", false)
 
+        // Phase 5 probe: is a udpgw server listening on the SSH host's
+        // loopback? Rides the existing session (direct-tcpip channel), so
+        // no extra socket and no routing concerns. Diagnostic only - it
+        // never affects the connection state. Per the Phase 5 plan we
+        // STOP after this: no udpgw client until the probe result is
+        // reviewed.
+        Thread {
+            try {
+                val channel = ssh.newDirectConnection("127.0.0.1", config.udpgwPort)
+                udpgwReachableViaSsh = true
+                try { channel.close() } catch (_: Exception) {}
+                onLog(
+                    null,
+                    "udpgw probe (via SSH): 127.0.0.1:${config.udpgwPort} opened - " +
+                        "a udpgw server is present",
+                    false
+                )
+            } catch (t: Throwable) {
+                udpgwReachableViaSsh = false
+                onLog(
+                    null,
+                    "udpgw probe (via SSH): 127.0.0.1:${config.udpgwPort} failed - " +
+                        "${t.javaClass.simpleName}: ${t.message}",
+                    false
+                )
+            }
+        }.apply { isDaemon = true }.start()
+
         startSocksListener()
         // Log the port the kernel actually assigned, not the 0 sentinel.
         onLog(null, "SOCKS5 proxy opened on 127.0.0.1:$socksPort", false)
@@ -185,10 +223,31 @@ class SshTunnelService(
 
     private fun handleSocksClient(client: Socket) {
         try {
-            val (destHost, destPort) = Socks5Handshake.negotiate(client)
-                ?: return client.close().also {
-                    onLog(null, "SOCKS5 handshake failed for a client", true)
+            val (destHost, destPort) = when (val n = Socks5Handshake.negotiate(client)) {
+                is Negotiation.Refused -> {
+                    refusals.refused(n.shape, n.detail)
+                    try { client.close() } catch (_: Exception) {}
+                    return
                 }
+                is Negotiation.Connect -> n.host to n.port
+            }
+
+            // Fake-IP leak detection (MapDNS): a CONNECT targeting an
+            // address inside the configured fake-IP pool means hev's
+            // reverse mapping did not fire - the connection would die at
+            // the SSH server. Flagged rate-limited like refusals; the
+            // connect is still attempted so the failure stays honest.
+            if (config.mapDnsNetmask != 0) {
+                val targetIp = ipv4ToIntOrNull(destHost)
+                if (targetIp != null &&
+                    (targetIp and config.mapDnsNetmask) == config.mapDnsNetwork
+                ) {
+                    refusals.refused(
+                        "fake-ip leak",
+                        "CONNECT target $destHost is inside the mapdns pool - reverse mapping did not fire"
+                    )
+                }
+            }
 
             // One durable log line per CONNECT: where the relay wants to go,
             // then whether the SSH direct-tcpip channel actually opened.
@@ -206,6 +265,23 @@ class SshTunnelService(
             onLog(null, "SOCKS client relay error: ${e.message}", true)
             try { client.close() } catch (_: Exception) {}
         }
+    }
+
+    /**
+     * Textual dotted-quad IPv4 parse only - never resolves DNS. Used to
+     * detect fake-IP leaks against the configured mapdns pool (the SSH
+     * layer keeps no dependency on the data model's parsers).
+     */
+    private fun ipv4ToIntOrNull(text: String): Int? {
+        val parts = text.trim().split('.')
+        if (parts.size != 4) return null
+        var value = 0L
+        for (part in parts) {
+            val octet = part.toIntOrNull() ?: return null
+            if (octet !in 0..255) return null
+            value = (value shl 8) or octet.toLong()
+        }
+        return value.toInt()
     }
 
     fun disconnect() {

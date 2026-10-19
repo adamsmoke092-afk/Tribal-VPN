@@ -129,12 +129,35 @@ class TribalVpnService : VpnService() {
                     ?: throw IllegalStateException("Unknown config id: $configId")
 
                 // --- Phase 3: open SSH session + local SOCKS5 forward ---
+                // MapDNS: validate the stored pool honestly - a corrupt
+                // profile fails the connect with a clear message, never a
+                // silent fix or default substitution.
+                var mapDnsNetwork = 0
+                var mapDnsNetmask = 0
+                if (config.enableMapDns) {
+                    if (!config.enableDns) {
+                        throw IllegalStateException(
+                            "MapDNS is enabled but Custom DNS is off - edit the profile"
+                        )
+                    }
+                    mapDnsNetwork = VpnConfig.parseIPv4(config.mapDnsNetwork)
+                        ?: throw IllegalStateException(
+                            "MapDNS pool base '${config.mapDnsNetwork}' is not a valid IPv4 - edit the profile"
+                        )
+                    mapDnsNetmask = VpnConfig.parseNetmask(config.mapDnsNetmask)
+                        ?: throw IllegalStateException(
+                            "MapDNS netmask '${config.mapDnsNetmask}' is not a contiguous mask - edit the profile"
+                        )
+                }
                 val sshConfig = com.tribal.vpn.ssh.SshConfig(
                     host = config.host,
                     port = config.port,
                     username = config.username,
                     password = if (config.authMethod == VpnConfig.AuthMethod.PASSWORD) config.password else null,
-                    privateKeyAlias = if (config.authMethod == VpnConfig.AuthMethod.KEY) config.privateKeyAlias else null
+                    privateKeyAlias = if (config.authMethod == VpnConfig.AuthMethod.KEY) config.privateKeyAlias else null,
+                    mapDnsNetwork = mapDnsNetwork,
+                    mapDnsNetmask = mapDnsNetmask,
+                    udpgwPort = config.udpGatewayPort
                 )
                 val sshTunnel = com.tribal.vpn.ssh.SshTunnelService(
                     config = sshConfig,
@@ -153,7 +176,21 @@ class TribalVpnService : VpnService() {
 
                 if (config.enableDns) {
                     builder.addDnsServer(config.preferredDns)
-                    if (config.alternateDns.isNotBlank()) {
+                    if (config.enableMapDns) {
+                        // mapdns intercepts exactly ONE address:port, so the
+                        // alternate DNS would bypass interception and die as
+                        // UDP - push only the intercepted one.
+                        if (config.alternateDns.isNotBlank() &&
+                            config.alternateDns.trim() != config.preferredDns.trim()
+                        ) {
+                            appendLog(
+                                null,
+                                "MapDNS active: alternate DNS ${config.alternateDns} not pushed " +
+                                    "(only one interception address is supported)",
+                                false
+                            )
+                        }
+                    } else if (config.alternateDns.isNotBlank()) {
                         builder.addDnsServer(config.alternateDns)
                     }
                 }
@@ -200,7 +237,14 @@ class TribalVpnService : VpnService() {
                     // assigned, since socksBindPort is 0) - not the requested
                     // default, which is just the "any free port" sentinel.
                     socksPort = sshTunnel.socksPort,
-                    filesDir = filesDir.absolutePath
+                    filesDir = filesDir.absolutePath,
+                    mapDns = if (config.enableMapDns) {
+                        MapDnsParams(
+                            dnsAddress = config.preferredDns.trim(),
+                            network = config.mapDnsNetwork.trim(),
+                            netmask = config.mapDnsNetmask.trim()
+                        )
+                    } else null
                 )
                 if (!tunnelStarted) {
                     appendLog(

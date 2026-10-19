@@ -26,6 +26,20 @@ import hev.htproxy.TProxyService
  * Every step is logged (logcat tag TribalTunnelBridge AND the durable app
  * log) so a silent false can never happen again without a trace.
  */
+/**
+ * MapDNS parameters for the hev relay config: hev answers DNS queries sent
+ * to [dnsAddress]:53 on-device with fake IPs from the pool, and maps fake
+ * IPs back to domain names for outbound CONNECTs (reverse mapping verified
+ * in hev's pinned source: hev_socks5_addr_from_lwip -> hev_mapped_dns_lookup
+ * -> domain-name CONNECT, resolved server-side by sshj). null = omit the
+ * section entirely.
+ */
+data class MapDnsParams(
+    val dnsAddress: String,
+    val network: String,
+    val netmask: String
+)
+
 object NativeTunnelBridge {
 
     private const val TAG = "TribalTunnelBridge"
@@ -89,8 +103,10 @@ object NativeTunnelBridge {
                 libraryLoaded = true
                 log("variant $variant: OK")
             } catch (e: UnsatisfiedLinkError) {
-                // Expected for b/c in release builds (debug-only modules
-                // there) - the FAIL line is honest, not a defect.
+                // Variant c is a debug-only module (Android.mk gates it on
+                // TRIBAL_DIAG_VARIANTS): its FAIL line in release builds is
+                // expected, not a defect. A variant-a FAIL is the signal the
+                // RELRO fallback below will kick in.
                 log("variant $variant: FAIL ${e.message}", isError = true)
             } finally {
                 Diagnostics.endLoadProbe()
@@ -101,8 +117,16 @@ object NativeTunnelBridge {
         if (loadedVariant == null) {
             log("all bridge variants failed to load - Phase 5 externs unavailable", isError = true)
             logMemoryStats("native library load failure")
-        } else if (probeAll) {
-            log("probe-all: first loadable variant was $loadedVariant - its natives are the ones in use")
+        } else {
+            // Visible fallback notice, deliberately INFO (not red): on
+            // devices whose old linker rejects variant a's RELRO layout,
+            // b carrying the relay is the designed path, not an error.
+            if (loadedVariant != VARIANTS.first()) {
+                log("bridge fallback in use: $loadedVariant (variant a failed to load)")
+            }
+            if (probeAll) {
+                log("probe-all: first loadable variant was $loadedVariant - its natives are the ones in use")
+            }
         }
     }
 
@@ -114,9 +138,18 @@ object NativeTunnelBridge {
      * we only hand the raw fd to hev and never close it here.
      *
      * @param filesDir absolute path of the app's files dir (for the config)
+     * @param mapDns optional MapDNS section (fake-IP DNS answered
+     *   on-device; names resolved server-side via domain CONNECT); null =
+     *   omit the section.
      * @return true iff hev accepted the config and started its relay worker.
      */
-    fun startTunnel(tunFd: Int, socksAddr: String, socksPort: Int, filesDir: String): Boolean {
+    fun startTunnel(
+        tunFd: Int,
+        socksAddr: String,
+        socksPort: Int,
+        filesDir: String,
+        mapDns: MapDnsParams? = null
+    ): Boolean {
         if (!libraryLoaded) {
             log("startTunnel: bridge library not loaded - relay cannot start (tun_fd=$tunFd)", isError = true)
             return false
@@ -137,11 +170,29 @@ object NativeTunnelBridge {
             append("  port: $socksPort\n")
             append("  address: $socksAddr\n")
             append("  udp: 'tcp'\n")
+            if (mapDns != null) {
+                // mapdns keys verified in hev's pinned README + source:
+                // address/port = the DNS destination hev intercepts (must
+                // match the VpnService DNS), network/netmask = the fake-IP
+                // pool, cache-size = the name table.
+                append("mapdns:\n")
+                append("  address: ${mapDns.dnsAddress}\n")
+                append("  port: 53\n")
+                append("  network: ${mapDns.network}\n")
+                append("  netmask: ${mapDns.netmask}\n")
+                append("  cache-size: 10000\n")
+            }
         }
         val configFile = File(filesDir, "hev_tunnel_config.yml")
         return try {
             configFile.writeText(config)
             log("startTunnel: config=${configFile.absolutePath} tun_fd=$tunFd\n$config")
+            if (mapDns != null) {
+                log(
+                    "startTunnel: mapdns enabled - DNS ${mapDns.dnsAddress}:53 answered " +
+                        "on-device, fake-IP pool ${mapDns.network} netmask ${mapDns.netmask}"
+                )
+            }
             // Upstream binding (hev-jni.c): returns jboolean - true iff the
             // relay worker started with a readable config path and a valid fd.
             val started = TProxyService.TProxyStartService(configFile.absolutePath, tunFd)
