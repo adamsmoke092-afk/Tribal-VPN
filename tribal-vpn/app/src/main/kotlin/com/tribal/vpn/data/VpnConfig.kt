@@ -21,6 +21,11 @@ data class VpnConfig(
     val alternateDns: String = "8.8.4.4",
     val enableUdp: Boolean = false,
     val udpGatewayPort: Int = 7300,
+    // UDP Custom port range (HTTP Custom style): the TCP ports the VPS
+    // may redirect to udpgw. The Phase 5 direct-route probe samples
+    // ports from it; the future UDP client will pick its port from it.
+    // Default 1-65535 matches the sshkit convention.
+    val udpPortRange: String = "1-65535",
     val mtu: Int = 1400,
     // MapDNS (Phase 5): hev-socks5-tunnel answers DNS queries on-device
     // with fake IPs from the pool below; when an app connects to a fake
@@ -56,6 +61,27 @@ data class VpnConfig(
          */
         fun parsePort(raw: String): Int? =
             raw.trim().toIntOrNull()?.takeIf { it in 1..65535 }
+
+        /**
+         * Parses a single port ("7300") or an inclusive lo-hi range
+         * ("1-65535") into an IntRange. Anything else - reversed ends,
+         * ends outside 1..65535, extra dashes, empty - returns null;
+         * callers surface that as a validation error, never silently
+         * substitute a default.
+         */
+        fun parsePortRange(raw: String): IntRange? {
+            val text = raw.trim()
+            if (text.isEmpty()) return null
+            val dash = text.indexOf('-')
+            return if (dash < 0) {
+                val port = parsePort(text) ?: return null
+                port..port
+            } else {
+                val lo = parsePort(text.substring(0, dash)) ?: return null
+                val hi = parsePort(text.substring(dash + 1)) ?: return null
+                if (lo <= hi) lo..hi else null
+            }
+        }
 
         /**
          * Parses a dotted-quad IPv4 address into its 32-bit value.

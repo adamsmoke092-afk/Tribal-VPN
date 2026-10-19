@@ -56,6 +56,7 @@ fun EditProfileScreen(
     var preferredDns by remember { mutableStateOf(existing?.preferredDns ?: "8.8.8.8") }
     var alternateDns by remember { mutableStateOf(existing?.alternateDns ?: "8.8.4.4") }
     var udpPort by remember { mutableStateOf((existing?.udpGatewayPort ?: 7300).toString()) }
+    var udpRange by remember { mutableStateOf(existing?.udpPortRange ?: "1-65535") }
     var mtu by remember { mutableStateOf((existing?.mtu ?: 1400).toString()) }
 
     var enableMapDns by remember { mutableStateOf(existing?.enableMapDns ?: true) }
@@ -83,6 +84,9 @@ fun EditProfileScreen(
         }
         if (VpnConfig.parsePort(udpPort) == null) {
             e["udpPort"] = "udpgw port must be a number from 1 to 65535"
+        }
+        if (VpnConfig.parsePortRange(udpRange) == null) {
+            e["udpRange"] = "UDP port range must be a port or lo-hi, e.g. 1-65535"
         }
         // MapDNS needs exactly one DNS address to intercept, and a valid
         // contiguous fake-IP pool - validated, never silently defaulted.
@@ -112,6 +116,12 @@ fun EditProfileScreen(
             ?: run { errors = errors + ("mtu" to "MTU must be a number from 68 to 65535"); return }
         val udpNum = VpnConfig.parsePort(udpPort)
             ?: run { errors = errors + ("udpPort" to "udpgw port must be a number from 1 to 65535"); return }
+        val rangeText = udpRange.trim()
+        if (VpnConfig.parsePortRange(rangeText) == null) {
+            errors = errors + ("udpRange" to
+                "UDP port range must be a port or lo-hi, e.g. 1-65535")
+            return
+        }
         // Re-guards, same no-silent-default rule as the fields above.
         if (enableMapDns && !enableDns) {
             errors = errors + ("enableMapDns" to "MapDNS needs Custom DNS enabled above (one DNS address)")
@@ -141,6 +151,7 @@ fun EditProfileScreen(
             // does nothing real); preserve whatever the profile stored.
             enableUdp = existing?.enableUdp ?: false,
             udpGatewayPort = udpNum,
+            udpPortRange = rangeText,
             mtu = mtuNum,
             enableMapDns = enableMapDns,
             mapDnsNetwork = mapDnsNetwork.trim(),
@@ -336,6 +347,14 @@ fun EditProfileScreen(
                 LabeledField("udpgw Port (used by the Phase 5 udpgw probe)", errors["udpPort"]) {
                     GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)
                 }
+                LabeledField("UDP port range (direct-route probe)", errors["udpRange"]) {
+                    GoldTextField(udpRange, { udpRange = it })
+                }
+                Text(
+                    "Sampled directly from the phone, HTTP Custom style - " +
+                        "the VPS redirects these ports to udpgw",
+                    color = MidGray, fontSize = 11.sp
+                )
 
                 Divider(color = CardBorder)
 

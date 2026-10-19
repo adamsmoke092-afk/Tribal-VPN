@@ -105,6 +105,48 @@ class VpnConfigTest {
         assertEquals(8022, VpnConfig.parsePort(" 8022 "))
     }
 
+    // --- parsePortRange: the UDP Custom range field uses this. A null
+    // result must surface as a validation error, never a silent default. ---
+
+    @Test
+    fun `parsePortRange accepts single ports and lo-hi ranges`() {
+        assertEquals(7300..7300, VpnConfig.parsePortRange("7300"))
+        assertEquals(22..22, VpnConfig.parsePortRange("22"))
+        assertEquals(1..65535, VpnConfig.parsePortRange("1-65535"))
+        assertEquals(1000..2000, VpnConfig.parsePortRange(" 1000 - 2000 "))
+    }
+
+    @Test
+    fun `parsePortRange rejects garbage, reversed and out-of-range`() {
+        assertNull(VpnConfig.parsePortRange(""))
+        assertNull(VpnConfig.parsePortRange("abc"))
+        assertNull(VpnConfig.parsePortRange("-22"))
+        assertNull(VpnConfig.parsePortRange("65535-1"))
+        assertNull(VpnConfig.parsePortRange("0-100"))
+        assertNull(VpnConfig.parsePortRange("1-65536"))
+        assertNull(VpnConfig.parsePortRange("1-65535-9"))
+    }
+
+    @Test
+    fun `udpPortRange round trips through save and load`() {
+        val json = repoJson()
+        val original = baseConfig().copy(udpPortRange = "7300-7400")
+        val decoded = json.decodeFromString<VpnConfig>(json.encodeToString(original))
+        assertEquals("7300-7400", decoded.udpPortRange)
+    }
+
+    @Test
+    fun `old profiles without udpPortRange decode to 1-65535`() {
+        // Pinned load-side behavior: profiles saved before the range
+        // field existed decode with the sshkit-convention default. A
+        // future default change must touch this test first.
+        val json = Json { ignoreUnknownKeys = true }
+        val decoded = json.decodeFromString<VpnConfig>(
+            """{"id":"1","name":"Test","host":"vps.example.com","username":"root"}"""
+        )
+        assertEquals("1-65535", decoded.udpPortRange)
+    }
+
     // --- save/load round trip: the port a user saved must come back. ---
 
     @Test
@@ -139,5 +181,64 @@ class VpnConfigTest {
             """{"id":"1","name":"Test","host":"vps.example.com","username":"root"}"""
         )
         assertEquals(22, decoded.port)
+    }
+
+    // --- parseIPv4 / parseNetmask: the MapDNS pool fields use these. A
+    // null result must surface as a validation error, never a silent
+    // default. ---
+
+    @Test
+    fun `parseIPv4 accepts valid dotted quads`() {
+        assertEquals(0xC6120000.toInt(), VpnConfig.parseIPv4("198.18.0.0"))
+        assertEquals(0x08080808, VpnConfig.parseIPv4("8.8.8.8"))
+        assertEquals(0, VpnConfig.parseIPv4("0.0.0.0"))
+        assertEquals(0xFFFFFFFF.toInt(), VpnConfig.parseIPv4("255.255.255.255"))
+    }
+
+    @Test
+    fun `parseIPv4 rejects malformed and out-of-range input`() {
+        assertNull(VpnConfig.parseIPv4("abc"))
+        assertNull(VpnConfig.parseIPv4("1.2.3"))
+        assertNull(VpnConfig.parseIPv4("256.0.0.1"))
+        assertNull(VpnConfig.parseIPv4("1.2.3.4.5"))
+        assertNull(VpnConfig.parseIPv4(""))
+    }
+
+    @Test
+    fun `parseNetmask accepts contiguous masks and rejects holey ones`() {
+        assertEquals(0xFFFE0000.toInt(), VpnConfig.parseNetmask("255.254.0.0"))
+        assertEquals(0xFFFFFF00.toInt(), VpnConfig.parseNetmask("255.255.255.0"))
+        // Non-contiguous mask: fake-IP pool semantics would be undefined.
+        assertNull(VpnConfig.parseNetmask("255.0.255.0"))
+        assertNull(VpnConfig.parseNetmask("1.2.3.4"))
+        assertNull(VpnConfig.parseNetmask("nonsense"))
+    }
+
+    @Test
+    fun `mapdns fields round trip through save and load`() {
+        val json = repoJson()
+        val original = baseConfig().copy(
+            enableMapDns = true,
+            mapDnsNetwork = "198.18.0.0",
+            mapDnsNetmask = "255.254.0.0"
+        )
+        val decoded = json.decodeFromString<VpnConfig>(json.encodeToString(original))
+        assertEquals(original, decoded)
+    }
+
+    @Test
+    fun `old profiles without mapdns fields decode to mapdns defaults`() {
+        // Pinned load-side behavior: profiles saved before the MapDNS
+        // fields existed decode with mapdns ENABLED and the 198.18.0.0/15
+        // pool (default ON is a deliberate decision - the reverse mapping
+        // is verified in hev's pinned source). A future default change
+        // must touch this test first.
+        val json = Json { ignoreUnknownKeys = true }
+        val decoded = json.decodeFromString<VpnConfig>(
+            """{"id":"1","name":"Test","host":"vps.example.com","username":"root"}"""
+        )
+        assertEquals(true, decoded.enableMapDns)
+        assertEquals("198.18.0.0", decoded.mapDnsNetwork)
+        assertEquals("255.254.0.0", decoded.mapDnsNetmask)
     }
 }
