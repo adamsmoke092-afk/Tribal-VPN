@@ -1,8 +1,9 @@
 package com.tribal.vpn.ssh
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.EOFException
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
@@ -11,7 +12,10 @@ import java.util.concurrent.TimeUnit
 /**
  * Exercises Socks5Handshake.negotiate() against a REAL loopback socket pair
  * (no mocking of Socket/streams) so the byte-level RFC 1928 framing is
- * actually verified, not just assumed correct.
+ * actually verified, not just assumed correct. Reply bytes are asserted
+ * exactly: the wire stream is the contract with hev-socks5-tunnel. Refused
+ * handshakes assert their stable shape key, which the rate-limited refusal
+ * logging keys on.
  */
 class Socks5HandshakeTest {
 
@@ -27,37 +31,62 @@ class Socks5HandshakeTest {
         return serverSide to clientSide
     }
 
+    private fun negotiateAsync(serverSide: Socket) =
+        executor.submit<Negotiation> { Socks5Handshake.negotiate(serverSide) }
+
+    private fun write(socket: Socket, bytes: ByteArray) {
+        socket.getOutputStream().write(bytes)
+        socket.getOutputStream().flush()
+    }
+
+    private fun readExactly(socket: Socket, count: Int): ByteArray {
+        val buf = ByteArray(count)
+        val input = socket.getInputStream()
+        var off = 0
+        while (off < count) {
+            val n = input.read(buf, off, count - off)
+            if (n < 0) throw EOFException("socket closed after $off of $count reply bytes")
+            off += n
+        }
+        return buf
+    }
+
+    /** Sends the greeting and asserts the server's exact method-selection reply. */
+    private fun greetingAndMethodSelection(client: Socket) {
+        write(client, byteArrayOf(0x05, 0x01, 0x00))
+        assertTrue(
+            "expected [05 00] method reply",
+            readExactly(client, 2).contentEquals(byteArrayOf(0x05, 0x00))
+        )
+    }
+
+    private val connectSuccessReply = byteArrayOf(
+        0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0
+    )
+
+    private val cmdNotSupportedReply = byteArrayOf(
+        0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0
+    )
+
     @Test
     fun `negotiate parses IPv4 CONNECT request correctly`() {
         val (serverSide, clientSide) = loopbackPair()
+        val resultFuture = negotiateAsync(serverSide)
 
-        val resultFuture = executor.submit<Pair<String, Int>?> {
-            Socks5Handshake.negotiate(serverSide)
-        }
-
-        // Client writes: greeting (VER=5, NMETHODS=1, [NO_AUTH])
-        clientSide.getOutputStream().write(byteArrayOf(0x05, 0x01, 0x00))
-        clientSide.getOutputStream().flush()
-
-        // Read server's method selection reply (VER=5, METHOD=0x00)
-        val methodReply = ByteArray(2)
-        clientSide.getInputStream().read(methodReply)
-        assertEquals(0x05, methodReply[0].toInt())
-        assertEquals(0x00, methodReply[1].toInt())
-
-        // Client writes CONNECT request for 93.184.216.34:443 (example.com's old IP, just bytes)
-        clientSide.getOutputStream().write(
-            byteArrayOf(
-                0x05, 0x01, 0x00, 0x01, // VER, CMD=CONNECT, RSV, ATYP=IPv4
-                93.toByte(), 184.toByte(), 216.toByte(), 34.toByte(),
-                0x01, 0xBB.toByte() // port 443 big-endian
-            )
-        )
-        clientSide.getOutputStream().flush()
+        greetingAndMethodSelection(clientSide)
+        // CONNECT request for 93.184.216.34:443
+        write(clientSide, byteArrayOf(
+            0x05, 0x01, 0x00, 0x01,
+            93.toByte(), 184.toByte(), 216.toByte(), 34.toByte(),
+            0x01, 0xBB.toByte()
+        ))
 
         val result = resultFuture.get(5, TimeUnit.SECONDS)
-        assertEquals("93.184.216.34", result?.first)
-        assertEquals(443, result?.second)
+        assertEquals(Negotiation.Connect("93.184.216.34", 443), result)
+        assertTrue(
+            "byte-exact CONNECT success reply",
+            readExactly(clientSide, 10).contentEquals(connectSuccessReply)
+        )
 
         clientSide.close()
         serverSide.close()
@@ -66,14 +95,9 @@ class Socks5HandshakeTest {
     @Test
     fun `negotiate parses domain name CONNECT request correctly`() {
         val (serverSide, clientSide) = loopbackPair()
+        val resultFuture = negotiateAsync(serverSide)
 
-        val resultFuture = executor.submit<Pair<String, Int>?> {
-            Socks5Handshake.negotiate(serverSide)
-        }
-
-        clientSide.getOutputStream().write(byteArrayOf(0x05, 0x01, 0x00))
-        clientSide.getOutputStream().flush()
-        clientSide.getInputStream().read(ByteArray(2))
+        greetingAndMethodSelection(clientSide)
 
         val domain = "vps.example.com"
         val domainBytes = domain.toByteArray(Charsets.US_ASCII)
@@ -84,12 +108,14 @@ class Socks5HandshakeTest {
         request[5 + domainBytes.size] = 0x00
         request[5 + domainBytes.size + 1] = 0x16 // port 22
 
-        clientSide.getOutputStream().write(request)
-        clientSide.getOutputStream().flush()
+        write(clientSide, request)
 
         val result = resultFuture.get(5, TimeUnit.SECONDS)
-        assertEquals(domain, result?.first)
-        assertEquals(22, result?.second)
+        assertEquals(Negotiation.Connect(domain, 22), result)
+        assertTrue(
+            "byte-exact CONNECT success reply",
+            readExactly(clientSide, 10).contentEquals(connectSuccessReply)
+        )
 
         clientSide.close()
         serverSide.close()
@@ -98,18 +124,99 @@ class Socks5HandshakeTest {
     @Test
     fun `negotiate rejects wrong SOCKS version`() {
         val (serverSide, clientSide) = loopbackPair()
-
-        val resultFuture = executor.submit<Pair<String, Int>?> {
-            Socks5Handshake.negotiate(serverSide)
-        }
+        val resultFuture = negotiateAsync(serverSide)
 
         // SOCKS4 version byte (0x04) instead of 0x05 - must be rejected, not
         // silently coerced into a "best guess" destination.
-        clientSide.getOutputStream().write(byteArrayOf(0x04, 0x01, 0x00))
-        clientSide.getOutputStream().flush()
+        write(clientSide, byteArrayOf(0x04, 0x01, 0x00))
 
         val result = resultFuture.get(5, TimeUnit.SECONDS)
-        assertNull(result)
+        assertTrue("expected Refused, got $result", result is Negotiation.Refused)
+        assertEquals("bad version", (result as Negotiation.Refused).shape)
+
+        clientSide.close()
+        serverSide.close()
+    }
+
+    @Test
+    fun `hev FWD_UDP command is refused and labeled`() {
+        val (serverSide, clientSide) = loopbackPair()
+        val resultFuture = negotiateAsync(serverSide)
+
+        greetingAndMethodSelection(clientSide)
+        // cmd = 0x05: hev-socks5-core's FWD_UDP (UDP-in-TCP extension), the
+        // command hev sends today while our relay has no UDP path yet.
+        write(clientSide, byteArrayOf(
+            0x05, 0x05, 0x00, 0x01,
+            8, 8, 8, 8, 0x00, 0x35
+        ))
+
+        val result = resultFuture.get(5, TimeUnit.SECONDS)
+        assertTrue(result is Negotiation.Refused)
+        assertEquals("cmd=0x05", (result as Negotiation.Refused).shape)
+        assertTrue(result.detail.contains("FWD_UDP"))
+        assertTrue(readExactly(clientSide, 10).contentEquals(cmdNotSupportedReply))
+
+        clientSide.close()
+        serverSide.close()
+    }
+
+    @Test
+    fun `UDP ASSOCIATE command is refused and labeled`() {
+        val (serverSide, clientSide) = loopbackPair()
+        val resultFuture = negotiateAsync(serverSide)
+
+        greetingAndMethodSelection(clientSide)
+        write(clientSide, byteArrayOf(
+            0x05, 0x03, 0x00, 0x01,
+            8, 8, 8, 8, 0x00, 0x35
+        ))
+
+        val result = resultFuture.get(5, TimeUnit.SECONDS)
+        assertTrue(result is Negotiation.Refused)
+        assertEquals("cmd=0x03", (result as Negotiation.Refused).shape)
+        assertTrue(result.detail.contains("UDP ASSOCIATE"))
+        assertTrue(readExactly(clientSide, 10).contentEquals(cmdNotSupportedReply))
+
+        clientSide.close()
+        serverSide.close()
+    }
+
+    @Test
+    fun `greeting without NO_AUTH is refused with 0xFF reply`() {
+        val (serverSide, clientSide) = loopbackPair()
+        val resultFuture = negotiateAsync(serverSide)
+
+        // Methods 0x01 and 0x02 only - no NO_AUTH (0x00).
+        write(clientSide, byteArrayOf(0x05, 0x02, 0x01, 0x02))
+
+        val result = resultFuture.get(5, TimeUnit.SECONDS)
+        assertTrue(result is Negotiation.Refused)
+        assertEquals("no NO_AUTH in greeting", (result as Negotiation.Refused).shape)
+        assertTrue(
+            readExactly(clientSide, 2).contentEquals(byteArrayOf(0x05, 0xFF.toByte()))
+        )
+
+        clientSide.close()
+        serverSide.close()
+    }
+
+    @Test
+    fun `unsupported address type is refused with general failure reply`() {
+        val (serverSide, clientSide) = loopbackPair()
+        val resultFuture = negotiateAsync(serverSide)
+
+        greetingAndMethodSelection(clientSide)
+        write(clientSide, byteArrayOf(0x05, 0x01, 0x00, 0x06, 0x00, 0x35))
+
+        val result = resultFuture.get(5, TimeUnit.SECONDS)
+        assertTrue(result is Negotiation.Refused)
+        assertEquals("atyp=0x06", (result as Negotiation.Refused).shape)
+        assertTrue(
+            readExactly(clientSide, 10).contentEquals(
+                byteArrayOf(0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0)
+            )
+        )
 
         clientSide.close()
         serverSide.close()

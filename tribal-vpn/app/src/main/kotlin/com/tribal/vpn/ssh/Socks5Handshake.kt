@@ -16,7 +16,19 @@ import java.net.Socket
  * This is intentionally NOT a general-purpose SOCKS5 server: no BIND,
  * no UDP ASSOCIATE (UDP goes through badvpn-udpgw separately in Phase 5),
  * no username/password auth (not needed for a 127.0.0.1-only listener).
+ *
+ * Refusals return Negotiation.Refused with a stable "shape" key (e.g.
+ * "cmd=0x05") plus a human detail; the caller rate-limits them so a busy
+ * relay never writes one fsync'd log line per refused handshake. Command
+ * labels come from hev-socks5-core's protocol constants, verified at the
+ * pinned submodule: CONNECT=1, UDP_ASC=3, FWD_UDP=5 (hev's UDP-in-TCP
+ * extension - what hev sends today while UDP is unsupported here).
  */
+sealed interface Negotiation {
+    data class Connect(val host: String, val port: Int) : Negotiation
+    data class Refused(val shape: String, val detail: String) : Negotiation
+}
+
 object Socks5Handshake {
 
     private const val VERSION = 0x05
@@ -30,18 +42,22 @@ object Socks5Handshake {
     private const val REPLY_CMD_NOT_SUPPORTED = 0x07
 
     /**
-     * Performs the greeting + request phase. Returns (destHost, destPort) on
-     * success, or null if the handshake failed / was malformed (caller should
-     * close the socket — never guess or default to a fake destination).
+     * Performs the greeting + request phase. The byte stream is exactly
+     * RFC 1928; only the RETURN type is richer than a nullable pair, so the
+     * caller can log what was actually refused instead of a bare "failed".
+     * On Refused the caller should close the socket — never guess or fake
+     * a destination.
      */
     @Throws(IOException::class)
-    fun negotiate(client: Socket): Pair<String, Int>? {
+    fun negotiate(client: Socket): Negotiation {
         val input = DataInputStream(client.getInputStream())
         val output = client.getOutputStream()
 
         // --- Greeting ---
         val ver = input.readUnsignedByte()
-        if (ver != VERSION) return null
+        if (ver != VERSION) {
+            return Negotiation.Refused("bad version", "version=0x%02X".format(ver))
+        }
 
         val nMethods = input.readUnsignedByte()
         val methods = ByteArray(nMethods)
@@ -50,7 +66,10 @@ object Socks5Handshake {
         // We only support NO_AUTH for this loopback-only listener.
         if (methods.none { it.toInt() == NO_AUTH }) {
             output.write(byteArrayOf(VERSION.toByte(), 0xFF.toByte())) // no acceptable methods
-            return null
+            return Negotiation.Refused(
+                "no NO_AUTH in greeting",
+                "methods=" + methods.joinToString(",") { "0x%02X".format(it) }
+            )
         }
         output.write(byteArrayOf(VERSION.toByte(), NO_AUTH.toByte()))
 
@@ -60,9 +79,13 @@ object Socks5Handshake {
         input.readUnsignedByte() // reserved byte
         val atyp = input.readUnsignedByte()
 
-        if (reqVer != VERSION || cmd != CMD_CONNECT) {
+        if (reqVer != VERSION) {
             writeReply(output, REPLY_CMD_NOT_SUPPORTED)
-            return null
+            return Negotiation.Refused("bad request version", "version=0x%02X".format(reqVer))
+        }
+        if (cmd != CMD_CONNECT) {
+            writeReply(output, REPLY_CMD_NOT_SUPPORTED)
+            return Negotiation.Refused("cmd=0x%02X".format(cmd), commandName(cmd))
         }
 
         val destHost: String = when (atyp) {
@@ -84,13 +107,22 @@ object Socks5Handshake {
             }
             else -> {
                 writeReply(output, REPLY_GENERAL_FAILURE)
-                return null
+                return Negotiation.Refused("atyp=0x%02X".format(atyp), "unsupported address type")
             }
         }
         val destPort = input.readUnsignedShort()
 
         writeReply(output, REPLY_SUCCESS)
-        return destHost to destPort
+        return Negotiation.Connect(destHost, destPort)
+    }
+
+    /** Command names for refusal logs (hev-socks5-core protocol values). */
+    private fun commandName(cmd: Int): String = when (cmd) {
+        0x01 -> "CONNECT"
+        0x02 -> "BIND"
+        0x03 -> "UDP ASSOCIATE (hev UDP-in-UDP)"
+        0x05 -> "hev FWD_UDP (UDP-in-TCP)"
+        else -> "unknown command"
     }
 
     private fun writeReply(output: OutputStream, replyCode: Int) {
