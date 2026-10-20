@@ -4,7 +4,10 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import net.schmizz.sshj.connection.channel.direct.Parameters
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
+import java.io.DataInputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -60,6 +63,18 @@ class SshTunnelService(
     // while UDP is unsupported, and every durable log line is fsync'd - one
     // line per refusal would churn the log and drown real events.
     private val refusals = Socks5Refusals { line -> onLog(null, line, false) }
+
+    // UDP Custom (Phase 5): the shared udpgw client + its single transport,
+    // armed in connect() only when the profile enables it. Drops use the
+    // same rate-limited discipline as handshake refusals - never one
+    // fsync'd log line per datagram.
+    @Volatile
+    private var udpgwClient: UdpGwClient? = null
+    @Volatile
+    private var udpgwTransport: UdpGwTransport? = null
+    @Volatile
+    private var dnsOverSsh: DnsOverSsh? = null
+    private val udpDrops = Socks5Refusals { line -> onLog(null, line, false) }
 
     /**
      * Connects, authenticates, and starts accepting local SOCKS5 clients.
@@ -234,6 +249,12 @@ class SshTunnelService(
             directRouteOpenPorts = opened
         }.apply { isDaemon = true }.start()
 
+        // UDP Custom: arm the shared udpgw client BEFORE the SOCKS listener
+        // accepts traffic, so the first FWD_UDP handshake finds it alive.
+        if (config.enableUdp) {
+            armUdpGw()
+        }
+
         startSocksListener()
         // Log the port the kernel actually assigned, not the 0 sentinel.
         onLog(null, "SOCKS5 proxy opened on 127.0.0.1:$socksPort", false)
@@ -291,10 +312,19 @@ class SshTunnelService(
 
     private fun handleSocksClient(client: Socket) {
         try {
-            val (destHost, destPort) = when (val n = Socks5Handshake.negotiate(client)) {
+            val (destHost, destPort) = when (
+                val n = Socks5Handshake.negotiate(
+                    client,
+                    acceptFwdUdp = udpgwClient?.isAlive == true
+                )
+            ) {
                 is Negotiation.Refused -> {
                     refusals.refused(n.shape, n.detail)
                     try { client.close() } catch (_: Exception) {}
+                    return
+                }
+                is Negotiation.FwdUdp -> {
+                    startFwdUdpRelay(client)
                     return
                 }
                 is Negotiation.Connect -> n.host to n.port
@@ -335,6 +365,239 @@ class SshTunnelService(
         }
     }
 
+    // --- UDP Custom: hev FWD_UDP <-> udpgw bridge ---
+
+    /**
+     * Arms the single udpgw transport + client. Route 1 is the SSH session
+     * itself (direct-tcpip to the udpgw port on the VPS loopback) - the
+     * carrier sees nothing beyond the SSH connection it already sees.
+     * Route 2 is HTTP Custom's mechanism: a protected direct socket to the
+     * VPS on a port from the redirect range - UNENCRYPTED by design and
+     * logged loudly as such. Both failing means UDP honestly does not
+     * flow; TCP is unaffected either way.
+     */
+    private fun armUdpGw() {
+        val transport: UdpGwTransport = try {
+            val channel = ssh.newDirectConnection("127.0.0.1", config.udpgwPort)
+            onLog(
+                null,
+                "udp transport: via SSH session to 127.0.0.1:${config.udpgwPort} (encrypted)",
+                false
+            )
+            UdpGwTransport(
+                input = channel.inputStream,
+                output = channel.outputStream,
+                close = { try { channel.close() } catch (_: Exception) {} }
+            )
+        } catch (t: Throwable) {
+            try {
+                val socket = Socket()
+                socket.bind(null)
+                if (!protectSocket(socket)) {
+                    socket.close()
+                    throw IOException("VpnService.protect() failed")
+                }
+                socket.connect(InetSocketAddress(config.host, config.udpgwPort), 10_000)
+                socket.tcpNoDelay = true
+                onLog(
+                    null,
+                    "udp transport: direct to ${config.host}:${config.udpgwPort} - " +
+                        "UNENCRYPTED, HTTP Custom style",
+                    false
+                )
+                UdpGwTransport(
+                    input = socket.getInputStream(),
+                    output = socket.getOutputStream(),
+                    close = { try { socket.close() } catch (_: Exception) {} }
+                )
+            } catch (t2: Throwable) {
+                onLog(
+                    null,
+                    "udp transport unavailable: SSH route failed " +
+                        "(${t.javaClass.simpleName}: ${t.message}), direct route failed " +
+                        "(${t2.javaClass.simpleName}: ${t2.message}) - UDP will not flow, " +
+                        "TCP is unaffected",
+                    false
+                )
+                return
+            }
+        }
+        udpgwTransport = transport
+        val client = UdpGwClient(transport.input, transport.output) { line ->
+            onLog(null, line, false)
+        }
+        udpgwClient = client
+        client.start()
+        dnsOverSsh = DnsOverSsh(
+            connect = {
+                try {
+                    val ch = ssh.newDirectConnection(config.dnsAddress, 53)
+                    DnsIo(ch.inputStream, ch.outputStream) {
+                        try { ch.close() } catch (_: Exception) {}
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+            },
+            onLog = { line -> onLog(null, line, false) }
+        )
+        onLog(null, "udp udpgw client armed - hev FWD_UDP (UDP-in-TCP) is accepted", false)
+    }
+
+    /**
+     * One hev FWD_UDP connection = one UDP flow set. hev frames each
+     * datagram as [datlen:u16 BE][hdrlen:u8][addr][payload] over this
+     * socket (verified in hev-socks5-core hev_socks5_udp_sendmmsg_tcp);
+     * the bridge translates every frame into a udpgw datagram on the
+     * shared transport and routes responses back the same way. NAME
+     * destinations (MapDNS reverse-mapped domains) are resolved through
+     * the SSH session first - udpgw carries binary addresses only, and
+     * hev ignores our response address for these flows (verified in
+     * hev-socks5-session-udp.c fwd_b), so the resolved IP is enough.
+     */
+    private fun startFwdUdpRelay(client: Socket) {
+        val udpgw = udpgwClient
+        if (udpgw == null || !udpgw.isAlive) {
+            udpDrops.refused("udp not armed", "FWD_UDP arrived while the udpgw client is down")
+            try { client.close() } catch (_: Exception) {}
+            return
+        }
+        val input = DataInputStream(client.getInputStream())
+        val output = client.getOutputStream()
+        val writeLock = Any()
+        val owner = Any()
+
+        udpgw.register(owner) { dest, payload ->
+            // Sink runs on the udpgw reader thread; one lock per hev
+            // connection keeps frame writes whole and ordered.
+            synchronized(writeLock) {
+                try {
+                    output.write(hevUdpFrame(dest, payload))
+                    output.flush()
+                } catch (_: Exception) {
+                    // hev hung up; its relay loop notices via EOF next.
+                }
+            }
+        }
+
+        try {
+            while (true) {
+                val datlen = input.readUnsignedShort()
+                val hdrlen = input.readUnsignedByte()
+                if (hdrlen < 5 || hdrlen > 266) {
+                    throw IOException("bad hev frame header hdrlen=$hdrlen")
+                }
+                if (datlen > 4096) {
+                    throw IOException("bad hev frame length datlen=$datlen")
+                }
+                val addr = ByteArray(hdrlen - 3)
+                input.readFully(addr)
+                val payload = ByteArray(datlen)
+                input.readFully(payload)
+                when (val dest = parseHevAddr(addr)) {
+                    is HevAddr.Ip -> {
+                        // Fake-IP leak check: an IPv4 dest inside the mapdns
+                        // pool means the reverse mapping did not fire.
+                        if (!dest.isIpv6 && config.mapDnsNetmask != 0) {
+                            val ip = ipv4ToIntOrNull(dest.hostAddress)
+                            if (ip != null &&
+                                (ip and config.mapDnsNetmask) == config.mapDnsNetwork
+                            ) {
+                                udpDrops.refused(
+                                    "udp fake-ip leak",
+                                    "UDP frame target ${dest.hostAddress}:${dest.port} is inside the mapdns pool"
+                                )
+                                continue
+                            }
+                        }
+                        udpgw.submit(owner, UdpDest(dest.host, dest.port, dest.isIpv6), payload)
+                    }
+                    is HevAddr.Name -> {
+                        val address = dnsOverSsh?.resolve(dest.name)
+                        if (address == null) {
+                            udpDrops.refused("udp resolve failed", "${dest.name}:${dest.port}")
+                            continue
+                        }
+                        udpgw.submit(owner, UdpDest(address, dest.port, address.size == 16), payload)
+                    }
+                    null -> udpDrops.refused("udp bad frame addr", "hdrlen=$hdrlen")
+                }
+            }
+        } catch (_: IOException) {
+            // hev hung up or the tunnel is closing - normal end of flow.
+        } finally {
+            udpgw.unregister(owner)
+            try { client.close() } catch (_: Exception) {}
+        }
+    }
+
+    /** Parsed hev SOCKS5 address: binary IP or reverse-mapped domain name. */
+    private sealed interface HevAddr {
+        data class Ip(val host: ByteArray, val port: Int, val isIpv6: Boolean) : HevAddr {
+            val hostAddress: String
+                get() = try {
+                    InetAddress.getByAddress(host).hostAddress
+                } catch (_: Exception) {
+                    "?"
+                }
+        }
+        data class Name(val name: String, val port: Int) : HevAddr
+    }
+
+    /** hev address bytes: [atype][host][port:u16 BE] (hev-socks5-proto.h). */
+    private fun parseHevAddr(addr: ByteArray): HevAddr? {
+        if (addr.isEmpty()) return null
+        return when (addr[0].toInt()) {
+            0x01 -> if (addr.size == 7) {
+                HevAddr.Ip(
+                    host = addr.copyOfRange(1, 5),
+                    port = ((addr[5].toInt() and 0xFF) shl 8) or (addr[6].toInt() and 0xFF),
+                    isIpv6 = false
+                )
+            } else null
+            0x04 -> if (addr.size == 19) {
+                HevAddr.Ip(
+                    host = addr.copyOfRange(1, 17),
+                    port = ((addr[17].toInt() and 0xFF) shl 8) or (addr[18].toInt() and 0xFF),
+                    isIpv6 = true
+                )
+            } else null
+            0x03 -> {
+                if (addr.size < 4) return null
+                val len = addr[1].toInt() and 0xFF
+                if (2 + len + 2 > addr.size) return null
+                HevAddr.Name(
+                    name = String(addr, 2, len, Charsets.US_ASCII),
+                    port = ((addr[2 + len].toInt() and 0xFF) shl 8) or
+                        (addr[3 + len].toInt() and 0xFF)
+                )
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * Response frame back to hev, the mirror of hev's own
+     * hev_socks5_udp_sendmmsg_tcp: [datlen:u16 BE][hdrlen:u8][atype]
+     * [host][port:u16 BE][payload] with hdrlen = 3 + addr bytes.
+     */
+    private fun hevUdpFrame(dest: UdpDest, payload: ByteArray): ByteArray {
+        val addrLen = if (dest.isIpv6) 19 else 7
+        val out = ByteArray(3 + addrLen + payload.size)
+        out[0] = ((payload.size shr 8) and 0xFF).toByte()
+        out[1] = (payload.size and 0xFF).toByte()
+        out[2] = (3 + addrLen).toByte()
+        var p = 3
+        out[p] = (if (dest.isIpv6) 0x04 else 0x01).toByte()
+        p++
+        System.arraycopy(dest.host, 0, out, p, if (dest.isIpv6) 16 else 4)
+        p += if (dest.isIpv6) 16 else 4
+        out[p] = ((dest.port shr 8) and 0xFF).toByte()
+        out[p + 1] = (dest.port and 0xFF).toByte()
+        System.arraycopy(payload, 0, out, p + 2, payload.size)
+        return out
+    }
+
     /**
      * Textual dotted-quad IPv4 parse only - never resolves DNS. Used to
      * detect fake-IP leaks against the configured mapdns pool (the SSH
@@ -355,6 +618,11 @@ class SshTunnelService(
     fun disconnect() {
         running.set(false)
         try { serverSocket?.close() } catch (_: Exception) {}
+        udpgwClient?.stop()
+        udpgwClient = null
+        try { udpgwTransport?.close() } catch (_: Exception) {}
+        udpgwTransport = null
+        dnsOverSsh = null
         try {
             if (ssh.isConnected) ssh.disconnect()
         } catch (_: Exception) {
@@ -371,6 +639,18 @@ class SshTunnelService(
         private const val DIRECT_PROBE_TIMEOUT_MS = 5_000
     }
 }
+
+/**
+ * The single byte stream every UDP flow shares: either an SSH direct-tcpip
+ * channel (encrypted, carrier-visible traffic unchanged) or a protected
+ * direct socket (HTTP Custom's mechanism, unencrypted). Both reduce to
+ * plain streams for UdpGwClient.
+ */
+internal class UdpGwTransport(
+    val input: InputStream,
+    val output: OutputStream,
+    val close: () -> Unit
+)
 
 /**
  * Ports sampled for the direct-route probe: the udpgw port (when it falls

@@ -31,8 +31,8 @@ class Socks5HandshakeTest {
         return serverSide to clientSide
     }
 
-    private fun negotiateAsync(serverSide: Socket) =
-        executor.submit<Negotiation> { Socks5Handshake.negotiate(serverSide) }
+    private fun negotiateAsync(serverSide: Socket, acceptFwdUdp: Boolean = false) =
+        executor.submit<Negotiation> { Socks5Handshake.negotiate(serverSide, acceptFwdUdp) }
 
     private fun write(socket: Socket, bytes: ByteArray) {
         socket.getOutputStream().write(bytes)
@@ -156,6 +156,31 @@ class Socks5HandshakeTest {
         assertEquals("cmd=0x05", (result as Negotiation.Refused).shape)
         assertTrue(result.detail.contains("FWD_UDP"))
         assertTrue(readExactly(clientSide, 10).contentEquals(cmdNotSupportedReply))
+
+        clientSide.close()
+        serverSide.close()
+    }
+
+    @Test
+    fun `FWD_UDP is accepted when the bridge is armed`() {
+        val (serverSide, clientSide) = loopbackPair()
+        val resultFuture = negotiateAsync(serverSide, acceptFwdUdp = true)
+
+        greetingAndMethodSelection(clientSide)
+        // hev's FWD_UDP request: zeroed IPv4 addr + zero port (verified in
+        // hev-socks5-core hev_socks5_client_udp_get_upstream_addr - the
+        // reply's address is ignored for UDP-in-TCP flows).
+        write(clientSide, byteArrayOf(
+            0x05, 0x05, 0x00, 0x01,
+            0, 0, 0, 0, 0x00, 0x00
+        ))
+
+        val result = resultFuture.get(5, TimeUnit.SECONDS)
+        assertEquals(Negotiation.FwdUdp, result)
+        assertTrue(
+            "byte-exact FWD_UDP success reply",
+            readExactly(clientSide, 10).contentEquals(connectSuccessReply)
+        )
 
         clientSide.close()
         serverSide.close()

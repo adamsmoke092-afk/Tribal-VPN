@@ -30,5 +30,12 @@ data class SshConfig(
     // UDP Custom port range (parsed from VpnConfig.udpPortRange by
     // TribalVpnService): the direct-route probe samples ports from this
     // range against the SSH host - the HTTP Custom redirect mechanism.
-    val udpPortRange: IntRange = 1..65535
+    val udpPortRange: IntRange = 1..65535,
+    // When true, SshTunnelService arms the udpgw client and accepts hev's
+    // FWD_UDP connections (the UDP Custom feature). When false, FWD_UDP
+    // handshakes are refused honestly like before.
+    val enableUdp: Boolean = false,
+    // Upstream DNS server the UDP bridge's NAME resolver queries through
+    // the SSH session (from VpnConfig.preferredDns).
+    val dnsAddress: String = "8.8.8.8"
 )

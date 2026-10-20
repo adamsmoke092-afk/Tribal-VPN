@@ -27,12 +27,16 @@ import java.net.Socket
 sealed interface Negotiation {
     data class Connect(val host: String, val port: Int) : Negotiation
     data class Refused(val shape: String, val detail: String) : Negotiation
+
+    /** hev's FWD_UDP (UDP-in-TCP) flow: datagrams follow on the same socket. */
+    object FwdUdp : Negotiation
 }
 
 object Socks5Handshake {
 
     private const val VERSION = 0x05
     private const val CMD_CONNECT = 0x01
+    private const val CMD_FWD_UDP = 0x05
     private const val ATYP_IPV4 = 0x01
     private const val ATYP_DOMAIN = 0x03
     private const val ATYP_IPV6 = 0x04
@@ -49,7 +53,7 @@ object Socks5Handshake {
      * a destination.
      */
     @Throws(IOException::class)
-    fun negotiate(client: Socket): Negotiation {
+    fun negotiate(client: Socket, acceptFwdUdp: Boolean = false): Negotiation {
         val input = DataInputStream(client.getInputStream())
         val output = client.getOutputStream()
 
@@ -83,11 +87,10 @@ object Socks5Handshake {
             writeReply(output, REPLY_CMD_NOT_SUPPORTED)
             return Negotiation.Refused("bad request version", "version=0x%02X".format(reqVer))
         }
-        if (cmd != CMD_CONNECT) {
-            writeReply(output, REPLY_CMD_NOT_SUPPORTED)
-            return Negotiation.Refused("cmd=0x%02X".format(cmd), commandName(cmd))
-        }
 
+        // The address is parsed for every command: FWD_UDP requests also
+        // carry one (hev sends a zeroed IPv4/IPv6 addr), and it must be
+        // consumed off the stream before the datagram frames begin.
         val destHost: String = when (atyp) {
             ATYP_IPV4 -> {
                 val addr = ByteArray(4)
@@ -112,8 +115,28 @@ object Socks5Handshake {
         }
         val destPort = input.readUnsignedShort()
 
-        writeReply(output, REPLY_SUCCESS)
-        return Negotiation.Connect(destHost, destPort)
+        return when (cmd) {
+            CMD_CONNECT -> {
+                writeReply(output, REPLY_SUCCESS)
+                Negotiation.Connect(destHost, destPort)
+            }
+            CMD_FWD_UDP -> {
+                // Only accepted when the caller says the udpgw client is
+                // live: accepting with nowhere to relay would let hev
+                // believe UDP works while every datagram died silently.
+                if (acceptFwdUdp) {
+                    writeReply(output, REPLY_SUCCESS)
+                    Negotiation.FwdUdp
+                } else {
+                    writeReply(output, REPLY_CMD_NOT_SUPPORTED)
+                    Negotiation.Refused("cmd=0x%02X".format(cmd), commandName(cmd))
+                }
+            }
+            else -> {
+                writeReply(output, REPLY_CMD_NOT_SUPPORTED)
+                Negotiation.Refused("cmd=0x%02X".format(cmd), commandName(cmd))
+            }
+        }
     }
 
     /** Command names for refusal logs (hev-socks5-core protocol values). */
