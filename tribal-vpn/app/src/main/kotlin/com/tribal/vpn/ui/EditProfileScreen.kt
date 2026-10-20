@@ -56,7 +56,6 @@ fun EditProfileScreen(
     var preferredDns by remember { mutableStateOf(existing?.preferredDns ?: "8.8.8.8") }
     var alternateDns by remember { mutableStateOf(existing?.alternateDns ?: "8.8.4.4") }
     var udpPort by remember { mutableStateOf((existing?.udpGatewayPort ?: 7300).toString()) }
-    var udpRange by remember { mutableStateOf(existing?.udpPortRange ?: "1-65535") }
     var enableUdpState by remember { mutableStateOf(existing?.enableUdp ?: false) }
     var mtu by remember { mutableStateOf((existing?.mtu ?: 1400).toString()) }
 
@@ -75,19 +74,19 @@ fun EditProfileScreen(
         if (authMethod == VpnConfig.AuthMethod.PASSWORD && password.isBlank()) {
             e["password"] = "Password is required"
         }
-        // Port fields are validated, never silently defaulted: garbage in a
-        // box must show an error, not quietly become 22 / 7300 / 1400.
-        if (VpnConfig.parsePort(port) == null) {
-            e["port"] = "SSH port must be a number from 1 to 65535"
+        // The one Port box, HTTP Custom style: a single number is the SSH
+        // port; a lo-hi range is the UDP redirect list. Garbage shows an
+        // error - it never quietly becomes 22.
+        if (VpnConfig.parsePort(port) == null &&
+            VpnConfig.parsePortRange(port) == null
+        ) {
+            e["port"] = "Port must be a number (SSH port, 22) or a range like 1-65535"
         }
         if (mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 } == null) {
             e["mtu"] = "MTU must be a number from 68 to 65535"
         }
         if (VpnConfig.parsePort(udpPort) == null) {
             e["udpPort"] = "udpgw port must be a number from 1 to 65535"
-        }
-        if (VpnConfig.parsePortRange(udpRange) == null) {
-            e["udpRange"] = "UDP port range must be a port or lo-hi, e.g. 1-65535"
         }
         // MapDNS needs exactly one DNS address to intercept, and a valid
         // contiguous fake-IP pool - validated, never silently defaulted.
@@ -111,18 +110,25 @@ fun EditProfileScreen(
         // validate() already showed errors for anything unparseable - these
         // guards exist so a default can NEVER be silently substituted, even
         // if the fields somehow changed between validate() and here.
-        val portNum = VpnConfig.parsePort(port)
-            ?: run { errors = errors + ("port" to "SSH port must be a number from 1 to 65535"); return }
+        val single = VpnConfig.parsePort(port)
+        // Only a dashed input sets the UDP list: a bare "22" must never
+        // silently narrow the stored range to 22-22.
+        val range = if (port.contains('-')) VpnConfig.parsePortRange(port) else null
+        if (single == null && range == null) {
+            errors = errors + ("port" to
+                "Port must be a number (SSH port, 22) or a range like 1-65535")
+            return
+        }
+        // A single number IS the SSH port; a range sets the UDP redirect
+        // list and leaves the SSH port exactly as stored (22 for new
+        // profiles) - one box, two meanings, nothing silently overwritten.
+        val portNum = single ?: (existing?.port ?: 22)
+        val rangeText = range?.let { "${it.first}-${it.last}" }
+            ?: (existing?.udpPortRange ?: "1-65535")
         val mtuNum = mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 }
             ?: run { errors = errors + ("mtu" to "MTU must be a number from 68 to 65535"); return }
         val udpNum = VpnConfig.parsePort(udpPort)
             ?: run { errors = errors + ("udpPort" to "udpgw port must be a number from 1 to 65535"); return }
-        val rangeText = udpRange.trim()
-        if (VpnConfig.parsePortRange(rangeText) == null) {
-            errors = errors + ("udpRange" to
-                "UDP port range must be a port or lo-hi, e.g. 1-65535")
-            return
-        }
         // Re-guards, same no-silent-default rule as the fields above.
         if (enableMapDns && !enableDns) {
             errors = errors + ("enableMapDns" to "MapDNS needs Custom DNS enabled above (one DNS address)")
@@ -196,11 +202,20 @@ fun EditProfileScreen(
                     }
                 }
                 Box(Modifier.weight(1f)) {
-                    LabeledField("SSH Port (TCP)", errors["port"]) {
-                        GoldTextField(port, { port = it }, keyboardType = KeyboardType.Number)
+                    LabeledField("Port", errors["port"]) {
+                        GoldTextField(
+                            port, { port = it },
+                            placeholder = "22 or 1-65535",
+                            keyboardType = KeyboardType.Number
+                        )
                     }
                 }
             }
+            Text(
+                "One box, HTTP Custom style: a single number = the SSH " +
+                    "port (22); a range like 1-65535 = the UDP redirect list",
+                color = MidGray, fontSize = 11.sp
+            )
             LabeledField("Username", errors["username"]) {
                 GoldTextField(username, { username = it }, placeholder = "root")
             }
@@ -353,17 +368,9 @@ fun EditProfileScreen(
                     }
                     GoldSwitch(enableUdpState) { enableUdpState = it }
                 }
-                LabeledField("udpgw Port (used by the Phase 5 udpgw probe)", errors["udpPort"]) {
+                LabeledField("udpgw Port (the VPS's UDP door - probe + client)", errors["udpPort"]) {
                     GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)
                 }
-                LabeledField("UDP port range (direct-route probe)", errors["udpRange"]) {
-                    GoldTextField(udpRange, { udpRange = it })
-                }
-                Text(
-                    "Sampled directly from the phone, HTTP Custom style - " +
-                        "the VPS redirects these ports to udpgw",
-                    color = MidGray, fontSize = 11.sp
-                )
 
                 Divider(color = CardBorder)
 
