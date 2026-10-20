@@ -6,7 +6,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
-import java.io.InputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.concurrent.CountDownLatch
@@ -31,7 +30,18 @@ class UdpGwClientTest {
                 onLog = onLog
             ).apply { start() }
 
-        fun serverRead(count: Int): ByteArray = readFully(fromClient, count)
+        fun serverRead(count: Int): ByteArray {
+            // Inlined read: a (non-inner) nested class cannot call the
+            // outer test class's instance members.
+            val out = ByteArray(count)
+            var off = 0
+            while (off < count) {
+                val n = fromClient.read(out, off, count - off)
+                if (n < 0) throw IOException("eof")
+                off += n
+            }
+            return out
+        }
 
         fun serverWrite(bytes: ByteArray) {
             toClientStream.write(bytes)
@@ -41,17 +51,6 @@ class UdpGwClientTest {
 
     private fun bytes(vararg v: Int): ByteArray =
         ByteArray(v.size) { i -> v[i].toByte() }
-
-    private fun readFully(input: InputStream, count: Int): ByteArray {
-        val out = ByteArray(count)
-        var off = 0
-        while (off < count) {
-            val n = input.read(out, off, count - off)
-            if (n < 0) throw IOException("eof")
-            off += n
-        }
-        return out
-    }
 
     @Test
     fun `first datagram carries REBIND with exact little-endian bytes`() {

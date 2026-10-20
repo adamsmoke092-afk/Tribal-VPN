@@ -620,7 +620,7 @@ class SshTunnelService(
         try { serverSocket?.close() } catch (_: Exception) {}
         udpgwClient?.stop()
         udpgwClient = null
-        try { udpgwTransport?.close() } catch (_: Exception) {}
+        try { udpgwTransport?.close?.invoke() } catch (_: Exception) {}
         udpgwTransport = null
         dnsOverSsh = null
         try {
