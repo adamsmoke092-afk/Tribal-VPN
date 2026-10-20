@@ -83,7 +83,7 @@ class DnsOverSshTest {
         out.write(0)
         out.write(60)
         out.write(0)
-        out.write(4) // rdlength: a 2-byte compression pointer
+        out.write(2) // rdlength: the rdata is one 2-byte compression pointer
         out.write(0xC0)
         out.write(0x0C)
         return out.toByteArray()
