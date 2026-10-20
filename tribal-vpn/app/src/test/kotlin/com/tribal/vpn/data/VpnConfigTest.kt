@@ -145,6 +145,9 @@ class VpnConfigTest {
             """{"id":"1","name":"Test","host":"vps.example.com","username":"root"}"""
         )
         assertEquals("1-65535", decoded.udpPortRange)
+        // UDP Custom stays OFF for old profiles: the toggle must be
+        // flipped deliberately, never silently enabled by an app update.
+        assertEquals(false, decoded.enableUdp)
     }
 
     // --- save/load round trip: the port a user saved must come back. ---

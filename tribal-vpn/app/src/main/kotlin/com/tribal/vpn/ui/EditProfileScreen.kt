@@ -57,6 +57,7 @@ fun EditProfileScreen(
     var alternateDns by remember { mutableStateOf(existing?.alternateDns ?: "8.8.4.4") }
     var udpPort by remember { mutableStateOf((existing?.udpGatewayPort ?: 7300).toString()) }
     var udpRange by remember { mutableStateOf(existing?.udpPortRange ?: "1-65535") }
+    var enableUdpState by remember { mutableStateOf(existing?.enableUdp ?: false) }
     var mtu by remember { mutableStateOf((existing?.mtu ?: 1400).toString()) }
 
     var enableMapDns by remember { mutableStateOf(existing?.enableMapDns ?: true) }
@@ -147,9 +148,7 @@ fun EditProfileScreen(
             enableDns = enableDns,
             preferredDns = preferredDns.trim(),
             alternateDns = alternateDns.trim(),
-            // UDP Custom UI was removed as a fake toggle (the Phase 5 stub
-            // does nothing real); preserve whatever the profile stored.
-            enableUdp = existing?.enableUdp ?: false,
+            enableUdp = enableUdpState,
             udpGatewayPort = udpNum,
             udpPortRange = rangeText,
             mtu = mtuNum,
@@ -337,12 +336,22 @@ fun EditProfileScreen(
 
                 Divider(color = CardBorder)
 
-                Column {
-                    Text("UDP Custom (udpgw)", color = Color.White, fontSize = 13.sp)
-                    Text(
-                        "Not implemented yet (Phase 5) - needs a udpgw server on your VPS",
-                        color = MidGray, fontSize = 11.sp
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("UDP Custom (udpgw client)", color = Color.White, fontSize = 13.sp)
+                        Text(
+                            "Tunnels app UDP through the VPS's udpgw - via the SSH " +
+                                "session when the provider allows it, otherwise direct " +
+                                "to the VPS port range (unencrypted, HTTP Custom style). " +
+                                "Needs a udpgw server on your VPS.",
+                            color = MidGray, fontSize = 11.sp
+                        )
+                    }
+                    GoldSwitch(enableUdpState) { enableUdpState = it }
                 }
                 LabeledField("udpgw Port (used by the Phase 5 udpgw probe)", errors["udpPort"]) {
                     GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)

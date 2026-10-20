@@ -167,7 +167,9 @@ class TribalVpnService : VpnService() {
                     mapDnsNetwork = mapDnsNetwork,
                     mapDnsNetmask = mapDnsNetmask,
                     udpgwPort = config.udpGatewayPort,
-                    udpPortRange = udpPortRange
+                    udpPortRange = udpPortRange,
+                    enableUdp = config.enableUdp,
+                    dnsAddress = config.preferredDns.trim()
                 )
                 val sshTunnel = com.tribal.vpn.ssh.SshTunnelService(
                     config = sshConfig,
@@ -272,23 +274,10 @@ class TribalVpnService : VpnService() {
                     throw IllegalStateException("Native packet relay failed to start")
                 }
 
-                // --- Phase 5: UDP gateway (only meaningful once Phase 4 relay is live) ---
-                if (config.enableUdp && tunnelStarted) {
-                    val udpStarted = NativeTunnelBridge.startUdpGateway(
-                        tunFd = vpnInterface!!.fd,
-                        udpgwAddr = "127.0.0.1",
-                        udpgwPort = config.udpGatewayPort
-                    )
-                    if (!udpStarted) {
-                        appendLog(
-                            null,
-                            "NativeTunnelBridge.startUdpGateway() returned false — badvpn-udpgw " +
-                                "native library not yet vendored/compiled (Phase 5). UDP Custom " +
-                                "toggle will have no effect until this is wired.",
-                            isError = false
-                        )
-                    }
-                }
+                // UDP Custom no longer goes through a native udpgw stub: the
+                // Kotlin udpgw client inside SshTunnelService (armed during
+                // sshTunnel.connect() when the profile enables it) bridges
+                // hev's FWD_UDP flows to the VPS udpgw. Nothing to do here.
 
                 trafficMonitor.start()
                 startTrafficTicker()
@@ -310,7 +299,6 @@ class TribalVpnService : VpnService() {
                 _connectionState.value = ConnectionState.ERROR
                 appendLog("Connection failed: ${e.message}", e.stackTraceToString(), isError = true)
                 updateNotification(ConnectionState.ERROR)
-                NativeTunnelBridge.stopUdpGateway()
                 NativeTunnelBridge.stopTunnel()
                 activeSshTunnel?.disconnect()
                 activeSshTunnel = null
@@ -323,7 +311,6 @@ class TribalVpnService : VpnService() {
         lastConnectedConfigId = null // user-initiated: don't let network changes resurrect this
         serviceJob?.cancel()
         trafficTickerJob?.cancel()
-        NativeTunnelBridge.stopUdpGateway()
         NativeTunnelBridge.stopTunnel()
         activeSshTunnel?.disconnect()
         activeSshTunnel = null
