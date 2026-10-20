@@ -46,7 +46,16 @@ fun EditProfileScreen(
     val isNew = existing == null
     var name by remember { mutableStateOf(existing?.name ?: "") }
     var host by remember { mutableStateOf(existing?.host ?: "") }
-    var port by remember { mutableStateOf((existing?.port ?: 22).toString()) }
+    // The box shows the meaningful spec: the stored UDP range while the SSH
+    // port is at its default (22), otherwise the custom SSH port. Without
+    // this, a saved 1-65535 appeared to "revert to 22" on reopen even
+    // though the range had saved.
+    var port by remember {
+        mutableStateOf(
+            if (existing != null && existing.port == 22) existing.udpPortRange
+            else (existing?.port ?: 22).toString()
+        )
+    }
     var username by remember { mutableStateOf(existing?.username ?: "") }
     var password by remember { mutableStateOf(existing?.password ?: "") }
     var authMethod by remember { mutableStateOf(existing?.authMethod ?: VpnConfig.AuthMethod.PASSWORD) }
