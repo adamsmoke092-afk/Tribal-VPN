@@ -86,6 +86,11 @@ fun EditProfileScreen(
         ) {
             e["port"] = "Use a range like 1-65535"
         }
+        if (sshPort.isBlank() && existing == null) {
+            // No silent 22: a new profile must state its server's real SSH
+            // port. Empty on an existing profile keeps the stored port.
+            e["sshPort"] = "SSH port is required"
+        }
         if (sshPort.isNotBlank() && VpnConfig.parsePort(sshPort) == null) {
             e["sshPort"] = "SSH port must be a number from 1 to 65535"
         }
@@ -125,7 +130,13 @@ fun EditProfileScreen(
             return
         }
         val portNum = if (sshPort.isBlank()) {
-            existing?.port ?: 22
+            // Empty on an EXISTING profile keeps its stored port - never a
+            // silent 22. New profiles cannot reach this branch with a blank
+            // box: validate() requires the port when nothing is stored.
+            existing?.port ?: run {
+                errors = errors + ("sshPort" to "SSH port is required")
+                return
+            }
         } else {
             VpnConfig.parsePort(sshPort)
                 ?: run { errors = errors + ("sshPort" to "SSH port must be a number from 1 to 65535"); return }
@@ -223,6 +234,12 @@ fun EditProfileScreen(
                     "keep the current value. The SSH port lives in Advanced.",
                 color = MidGray, fontSize = 11.sp
             )
+            existing?.let {
+                Text(
+                    "Current UDP range: ${it.udpPortRange}",
+                    color = MidGray, fontSize = 11.sp
+                )
+            }
             LabeledField("Username", errors["username"]) {
                 GoldTextField(username, { username = it }, placeholder = "root")
             }
@@ -296,15 +313,22 @@ fun EditProfileScreen(
                 LabeledField("SSH Port", errors["sshPort"]) {
                     GoldTextField(
                         sshPort, { sshPort = it },
-                        placeholder = "22",
+                        placeholder = "e.g. 22",
                         keyboardType = KeyboardType.Number
                     )
                 }
                 Text(
-                    "Where the app connects over TCP. Leave empty to keep " +
-                        "the current SSH port.",
+                    "The real port your server's SSH listens on - required " +
+                        "when creating a profile. Leave empty here to keep " +
+                        "the stored one.",
                     color = MidGray, fontSize = 11.sp
                 )
+                existing?.let {
+                    Text(
+                        "Current SSH port: ${it.port}",
+                        color = MidGray, fontSize = 11.sp
+                    )
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
