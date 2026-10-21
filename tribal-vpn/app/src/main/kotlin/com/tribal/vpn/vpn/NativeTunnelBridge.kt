@@ -9,19 +9,23 @@ import java.io.File
 import hev.htproxy.TProxyService
 
 /**
- * Kotlin-side wrapper for the native tunnel engines (Phase 4: hev-socks5-tunnel,
- * Phase 5: badvpn-udpgw).
+ * Kotlin-side wrapper for the native tunnel engine (Phase 4: hev-socks5-tunnel).
  *
  * Phase 4 calls hev's OWN JNI binding, hev.htproxy.TProxyService - the class
  * upstream bundles inside its AAR. Loading our bridge .so pulls
  * libhev-socks5-tunnel.so in as a DT_NEEDED dependency, and its JNI_OnLoad
  * resolves (dlsym searches dependencies) and registers those methods - that
  * class MUST exist or JNI_OnLoad returns JNI_ERR and ART aborts the process
- * (uncatchable). Phase 5's externs remain in app/src/main/cpp/tunnel_bridge.cpp.
+ * (uncatchable).
  *
- * IMPORTANT: TribalVpnService MUST treat a false return from startTunnel()/
- * startUdpGateway() as a real failure - never report Connected anyway. A
- * false return here aborts the connection and closes tun0.
+ * Phase 5 (UDP) does NOT live here: UDP rides the Kotlin badvpn-udpgw client
+ * in ssh/SshTunnelService (hev FWD_UDP flows bridged to the VPS's udpgw over
+ * the SSH session or a direct protected socket). The old native
+ * startUdpGateway stubs were dead code pretending to be a feature - removed.
+ *
+ * IMPORTANT: TribalVpnService MUST treat a false return from startTunnel()
+ * as a real failure - never report Connected anyway. A false return here
+ * aborts the connection and closes tun0.
  *
  * Every step is logged (logcat tag TribalTunnelBridge AND the durable app
  * log) so a silent false can never happen again without a trace.
@@ -115,7 +119,7 @@ object NativeTunnelBridge {
         }
 
         if (loadedVariant == null) {
-            log("all bridge variants failed to load - Phase 5 externs unavailable", isError = true)
+            log("all bridge variants failed to load - the relay cannot start", isError = true)
             logMemoryStats("native library load failure")
         } else {
             // Visible fallback notice, deliberately INFO (not red): on
@@ -218,16 +222,6 @@ object NativeTunnelBridge {
         }
     }
 
-    /** @return true if the UDP gateway actually started, false otherwise. */
-    fun startUdpGateway(tunFd: Int, udpgwAddr: String, udpgwPort: Int): Boolean {
-        if (!libraryLoaded) return false
-        return nativeStartUdpGateway(tunFd, udpgwAddr, udpgwPort) == 0
-    }
-
-    fun stopUdpGateway() {
-        if (libraryLoaded) nativeStopUdpGateway()
-    }
-
     /**
      * Records memory state at the moment of a native load failure - the
      * "Out of memory" in a dlopen error is often misleading (an old-linker
@@ -257,8 +251,4 @@ object NativeTunnelBridge {
         if (isError) Log.e(TAG, message) else Log.i(TAG, message)
         TribalVpnService.appendLog(null, message, isError)
     }
-
-    // --- JNI externs; implemented in app/src/main/cpp/tunnel_bridge.cpp ---
-    private external fun nativeStartUdpGateway(tunFd: Int, udpgwAddr: String, udpgwPort: Int): Int
-    private external fun nativeStopUdpGateway()
 }
