@@ -150,6 +150,34 @@ class VpnConfigTest {
         assertEquals(false, decoded.enableUdp)
     }
 
+    @Test
+    fun `legacy port 65535 is preserved, never reinterpreted`() {
+        // The one-box bug once saved SSH port 65535 by mistake. The loader
+        // must hand back exactly what is stored - reinterpretation, silent
+        // repair, or a port-22 fallback would all hide real state.
+        val json = Json { ignoreUnknownKeys = true }
+        val decoded = json.decodeFromString<VpnConfig>(
+            """{"id":"1","name":"Test","host":"vps.example.com","username":"root","port":65535}"""
+        )
+        assertEquals(65535, decoded.port)
+    }
+
+    @Test
+    fun `ssh port and udp gateway port stay independent`() {
+        // The two numbers belong to two different protocols; persistence
+        // must never cross-wire them.
+        val json = repoJson()
+        val original = baseConfig().copy(
+            port = 8022,
+            udpGatewayPort = 7300,
+            udpPortRange = "1-65535"
+        )
+        val decoded = json.decodeFromString<VpnConfig>(json.encodeToString(original))
+        assertEquals(8022, decoded.port)
+        assertEquals(7300, decoded.udpGatewayPort)
+        assertEquals("1-65535", decoded.udpPortRange)
+    }
+
     // --- save/load round trip: the port a user saved must come back. ---
 
     @Test
