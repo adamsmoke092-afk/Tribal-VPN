@@ -25,18 +25,20 @@ implemented.
 These are wired up to the point of being called, with a stub or honest
 failure behind them — not faked:
 
-- **Phase 4 (hev-socks5-tunnel via NDK)**: `TribalVpnService.connect()` calls
-  `NativeTunnelBridge.startTunnel(...)` for real, but the underlying native
-  library (`app/src/main/cpp/tunnel_bridge.cpp`) is a stub that always
-  returns failure — `hev-socks5-tunnel` isn't vendored yet (see
-  `app/src/main/cpp/CMakeLists.txt` for the exact `git submodule` command
-  needed). **Practical effect: today, tun0 comes up and the SSH SOCKS5 proxy
-  comes up, but no IP packets are relayed between them.** The service does
-  NOT hide this — it appends a log entry explaining exactly that instead of
-  silently reporting full connectivity.
-- **Phase 5 (UDP/badvpn-udpgw)**: same pattern — `NativeTunnelBridge.startUdpGateway()`
-  is called when `enableUdp` is on, but only after Phase 4's relay is confirmed
-  live, and it also returns failure honestly until `badvpn-udpgw` is vendored.
+- **Phase 4 (hev-socks5-tunnel via NDK)**: **VERIFIED 2026-10-17** — CI run 16
+  built the relay from the pinned submodule, and the on-device Connect showed
+  `TProxyStartService` returning TRUE with real traffic flowing
+  (tun0 → hev → SOCKS5 → sshj → internet). `startTunnel()` returning false
+  still aborts the connection honestly and closes tun0.
+- **Phase 5 (UDP)**: **shipped 2026-10-20 as a Kotlin badvpn-udpgw client** —
+  hev's UDP flows (SOCKS5 FWD_UDP) are bridged to the VPS's udpgw over the
+  SSH session (encrypted, preferred) or a direct protected socket into the
+  provider's redirect range (HTTP Custom style, unencrypted, logged loudly);
+  domain-destined UDP is resolved through the SSH session first. Activation
+  logs verified availability and never fakes it: if no transport opens, the
+  log says "UDP will not flow, TCP unaffected". Requires a udpgw server on
+  the VPS (port 7300 default, profile-configurable). The old native
+  `startUdpGateway` stub is removed.
 - **SSH key auth**: `SshTunnelService.authenticate()` throws
   `UnsupportedOperationException` for `AuthMethod.KEY` rather than silently
   falling back to password or pretending to succeed. Needs an Android

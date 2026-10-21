@@ -32,13 +32,21 @@ failure behind them — not faked:
   ndk-build from `app/src/main/cpp/Android.mk` (upstream has no CMake build),
   and `tunnel_bridge.cpp` runs the blocking `hev_socks5_tunnel_main_from_str()`
   API on a worker thread with a synchronous-init failure window so start
-  failures are reported honestly. **Still pending: green CI build + on-device
-  verification — until a build is installed and traffic is observed flowing,
-  treat the relay as wired-but-unverified.** If `startTunnel()` does fail, the
+  failures are reported honestly. **VERIFIED 2026-10-17**: CI run 16 built the
+  relay from the pinned submodule (re-pinned to `873541b8…` after the old pin
+  vanished upstream), and the on-device Connect showed `TProxyStartService`
+  TRUE with real traffic (Telegram DC + carrier proxy IPs) through
+  tun0 → hev → SOCKS5 → sshj → internet. If `startTunnel()` does fail, the
   service logs it (isError) and does not claim packet relay is active.
-- **Phase 5 (UDP/badvpn-udpgw)**: same pattern — `NativeTunnelBridge.startUdpGateway()`
-  is called when `enableUdp` is on, but only after Phase 4's relay is confirmed
-  live, and it also returns failure honestly until `badvpn-udpgw` is vendored.
+- **Phase 5 (UDP)**: **shipped 2026-10-20 as a Kotlin badvpn-udpgw client** —
+  hev's UDP flows (SOCKS5 FWD_UDP) are bridged to the VPS's udpgw over the
+  SSH session (encrypted, preferred) or a direct protected socket into the
+  provider's redirect range (HTTP Custom style, unencrypted, logged loudly).
+  `NativeTunnelBridge.startUdpGateway()` was a dead stub that pretended to be
+  a feature - it and its JNI externs have been removed; the Kotlin bridge in
+  `ssh/UdpGwClient.kt` + `ssh/SshTunnelService.kt` is the real UDP path, and
+  activation logs verified availability (transport opened, or an honest
+  "UDP will not flow, TCP unaffected").
 - **SSH key auth**: `SshTunnelService.authenticate()` throws
   `UnsupportedOperationException` for `AuthMethod.KEY` rather than silently
   falling back to password or pretending to succeed. Needs an Android
@@ -107,9 +115,12 @@ call into the native/SSH layer, or an honest "not there yet" state.
 
 1. ~~Vendor `hev-socks5-tunnel` as a submodule and uncomment the CMake
    lines~~ **Done 2026-10-09** — via ndk-build instead of CMake (upstream has
-   no CMake build; see `app/src/main/cpp/Android.mk`). Remaining Phase 4 work:
-   green CI build, then on-device traffic verification.
-2. Same for `badvpn-udpgw` (Phase 5), gated behind Phase 4 being live.
+   no CMake build; see `app/src/main/cpp/Android.mk`). Phase 4 verification:
+   **DONE 2026-10-17** (on-device traffic observed; see the Phase 4 bullet).
+2. ~~Same for `badvpn-udpgw` (Phase 5)~~ **Shipped 2026-10-20** — as a Kotlin
+   badvpn-udpgw client (`ssh/UdpGwClient.kt`) plus the FWD_UDP bridge in
+   `ssh/SshTunnelService.kt`; no native vendoring needed and the dead native
+   stub was removed. Requires a udpgw server on the VPS (port 7300 default).
 3. Build the Android Keystore → sshj `KeyProvider` adapter so SSH key auth
    stops throwing `UnsupportedOperationException`.
 4. Replace the static `pendingConfigProvider` / companion-object StateFlow
