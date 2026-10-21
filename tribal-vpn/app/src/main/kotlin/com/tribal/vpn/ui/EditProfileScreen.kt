@@ -46,16 +46,11 @@ fun EditProfileScreen(
     val isNew = existing == null
     var name by remember { mutableStateOf(existing?.name ?: "") }
     var host by remember { mutableStateOf(existing?.host ?: "") }
-    // The box shows the meaningful spec: the stored UDP range while the SSH
-    // port is at its default (22), otherwise the custom SSH port. Without
-    // this, a saved 1-65535 appeared to "revert to 22" on reopen even
-    // though the range had saved.
-    var port by remember {
-        mutableStateOf(
-            if (existing != null && existing.port == 22) existing.udpPortRange
-            else (existing?.port ?: 22).toString()
-        )
-    }
+    // Both port boxes start EMPTY every time the screen opens. Empty means
+    // "keep the stored value" (or the default for a new profile), so
+    // changing one protocol's port can never risk the other's.
+    var udpRange by remember { mutableStateOf("") }
+    var sshPort by remember { mutableStateOf("") }
     var username by remember { mutableStateOf(existing?.username ?: "") }
     var password by remember { mutableStateOf(existing?.password ?: "") }
     var authMethod by remember { mutableStateOf(existing?.authMethod ?: VpnConfig.AuthMethod.PASSWORD) }
@@ -83,13 +78,16 @@ fun EditProfileScreen(
         if (authMethod == VpnConfig.AuthMethod.PASSWORD && password.isBlank()) {
             e["password"] = "Password is required"
         }
-        // The one Port box, HTTP Custom style: a single number is the SSH
-        // port; a lo-hi range is the UDP redirect list. Garbage shows an
-        // error - it never quietly becomes 22.
-        if (VpnConfig.parsePort(port) == null &&
-            VpnConfig.parsePortRange(port) == null
+        // Empty port boxes are legal (they keep the stored value); a
+        // filled box must be valid for ITS protocol. A bare number in the
+        // UDP box is an error, so it can never become the SSH port.
+        if (udpRange.isNotBlank() &&
+            (!udpRange.contains('-') || VpnConfig.parsePortRange(udpRange) == null)
         ) {
-            e["port"] = "Port must be a number (SSH port, 22) or a range like 1-65535"
+            e["port"] = "Use a range like 1-65535"
+        }
+        if (sshPort.isNotBlank() && VpnConfig.parsePort(sshPort) == null) {
+            e["sshPort"] = "SSH port must be a number from 1 to 65535"
         }
         if (mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 } == null) {
             e["mtu"] = "MTU must be a number from 68 to 65535"
@@ -119,19 +117,19 @@ fun EditProfileScreen(
         // validate() already showed errors for anything unparseable - these
         // guards exist so a default can NEVER be silently substituted, even
         // if the fields somehow changed between validate() and here.
-        val single = VpnConfig.parsePort(port)
-        // Only a dashed input sets the UDP list: a bare "22" must never
-        // silently narrow the stored range to 22-22.
-        val range = if (port.contains('-')) VpnConfig.parsePortRange(port) else null
-        if (single == null && range == null) {
-            errors = errors + ("port" to
-                "Port must be a number (SSH port, 22) or a range like 1-65535")
+        // Empty box = keep the stored value (defaults for a new profile);
+        // filled box = the parsed value. Nothing silently overwritten.
+        val range = if (udpRange.isNotBlank()) VpnConfig.parsePortRange(udpRange) else null
+        if (udpRange.isNotBlank() && (range == null || !udpRange.contains('-'))) {
+            errors = errors + ("port" to "Use a range like 1-65535")
             return
         }
-        // A single number IS the SSH port; a range sets the UDP redirect
-        // list and leaves the SSH port exactly as stored (22 for new
-        // profiles) - one box, two meanings, nothing silently overwritten.
-        val portNum = single ?: (existing?.port ?: 22)
+        val portNum = if (sshPort.isBlank()) {
+            existing?.port ?: 22
+        } else {
+            VpnConfig.parsePort(sshPort)
+                ?: run { errors = errors + ("sshPort" to "SSH port must be a number from 1 to 65535"); return }
+        }
         val rangeText = range?.let { "${it.first}-${it.last}" }
             ?: (existing?.udpPortRange ?: "1-65535")
         val mtuNum = mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 }
@@ -213,16 +211,16 @@ fun EditProfileScreen(
                 Box(Modifier.weight(1f)) {
                     LabeledField("Port", errors["port"]) {
                         GoldTextField(
-                            port, { port = it },
-                            placeholder = "22 or 1-65535",
+                            udpRange, { udpRange = it },
+                            placeholder = "1-65535",
                             keyboardType = KeyboardType.Number
                         )
                     }
                 }
             }
             Text(
-                "One box, HTTP Custom style: a single number = the SSH " +
-                    "port (22); a range like 1-65535 = the UDP redirect list",
+                "The UDP redirect list, HTTP Custom style. Leave empty to " +
+                    "keep the current value. The SSH port lives in Advanced.",
                 color = MidGray, fontSize = 11.sp
             )
             LabeledField("Username", errors["username"]) {
@@ -284,7 +282,7 @@ fun EditProfileScreen(
             ) {
                 Column {
                     Text("Advanced", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("DNS, UDP Custom, MTU", color = MidGray, fontSize = 11.sp)
+                    Text("SSH Port, DNS, UDP Custom, MTU", color = MidGray, fontSize = 11.sp)
                 }
                 Icon(
                     if (showAdvanced) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
@@ -294,6 +292,19 @@ fun EditProfileScreen(
 
             if (showAdvanced) {
                 Divider(color = CardBorder)
+
+                LabeledField("SSH Port", errors["sshPort"]) {
+                    GoldTextField(
+                        sshPort, { sshPort = it },
+                        placeholder = "22",
+                        keyboardType = KeyboardType.Number
+                    )
+                }
+                Text(
+                    "Where the app connects over TCP. Leave empty to keep " +
+                        "the current SSH port.",
+                    color = MidGray, fontSize = 11.sp
+                )
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
