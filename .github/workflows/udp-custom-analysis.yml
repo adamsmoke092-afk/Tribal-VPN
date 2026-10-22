@@ -1,0 +1,142 @@
+name: UDP Custom protocol analysis
+
+# Phase 1 protocol discovery - STATIC ANALYSIS ONLY.
+#
+# This workflow NEVER executes the downloaded binary. Every tool below
+# (sha256sum, file, readelf, go version -m, go tool nm, strings,
+# go tool objdump) only READS the file. The binary itself is never uploaded
+# as an artifact - only derived text evidence is.
+#
+# Reproducibility: the default inputs pin the canonical repo
+# (http-custom/udp-custom) to the immutable commit SHA below. Two runs at
+# the same ref must produce the same SHA-256; the recorded hash IS the
+# verification. To analyze a different official repo (e.g. http-custom/udp,
+# udphc, udpcustom, udp_custom), change BOTH "repo" and "ref" together.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Upstream owner/repo to analyze"
+        required: false
+        default: "http-custom/udp-custom"
+      ref:
+        description: "Immutable commit SHA of that repo (change together with repo)"
+        required: false
+        default: "fcf839259e623af001cfa85fe1e1e343c58df264"
+      binary_path:
+        description: "Path to the server binary inside that repo"
+        required: false
+        default: "bin/udp-custom-linux-amd64"
+      disassemble:
+        description: "Optional comma-separated Go symbol regexes to disassemble"
+        required: false
+        default: ""
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Toolchain context
+        run: |
+          uname -a
+          go version
+          command -v sha256sum file strings readelf objdump nm
+
+      - name: Download pinned upstream artifacts
+        env:
+          UPSTREAM_REPO: ${{ inputs.repo }}
+          UPSTREAM_REF: ${{ inputs.ref }}
+          UPSTREAM_BIN: ${{ inputs.binary_path }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/bin evidence/config
+          base="https://raw.githubusercontent.com/${UPSTREAM_REPO}/${UPSTREAM_REF}"
+          echo "Analyzing ${UPSTREAM_REPO} @ ${UPSTREAM_REF} (${UPSTREAM_BIN})"
+          curl -fsSL "$base/$UPSTREAM_BIN" -o evidence/bin/target-binary
+          curl -fsSL "$base/config/config.json" -o evidence/config/config.json || true
+          curl -fsSL "$base/config/udp-custom.service" -o evidence/config/udp-custom.service || true
+          curl -fsSL "$base/config/udpgw.service" -o evidence/config/udpgw.service || true
+          curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/commits/${UPSTREAM_REF}" -o evidence/upstream-commit.json
+          echo "(no disassembly requested)" > evidence/disasm.txt
+
+      - name: Identity (sha256 and file type)
+        run: |
+          cd evidence
+          sha256sum bin/target-binary | tee sha256.txt
+          file bin/target-binary | tee file.txt
+          readelf -h bin/target-binary > elf-header.txt 2>&1 || true
+
+      - name: Go build metadata
+        run: |
+          cd evidence
+          go version -m bin/target-binary > go-buildinfo.txt 2>&1 || {
+            echo "(go version -m failed - not a Go binary or buildinfo stripped)" > go-buildinfo.txt
+          }
+
+      - name: Symbol inventory
+        run: |
+          cd evidence
+          go tool nm bin/target-binary > symbols.txt 2>/dev/null \
+            || nm bin/target-binary > symbols.txt 2>/dev/null \
+            || echo "(no symbol table - stripped)" > symbols.txt
+          wc -l symbols.txt
+
+      - name: Strings inventory
+        run: |
+          cd evidence
+          strings -n 8 bin/target-binary > strings.txt
+          wc -l strings.txt
+
+      - name: Findings summary (printed to the run log)
+        run: |
+          cd evidence
+          {
+            echo "=== UPSTREAM PIN ==="
+            grep -m1 '"sha"' upstream-commit.json || true
+            echo "=== SHA-256 ==="
+            cat sha256.txt
+            echo "=== FILE TYPE ==="
+            cat file.txt
+            echo "=== GO BUILDINFO (first 60 lines) ==="
+            head -n 60 go-buildinfo.txt
+            echo "=== PROTOCOL-RELEVANT STRINGS (first 150 hits) ==="
+            grep -inE 'password|auth|login|token|handshake|listen|36712|7800|7300|udpgw|socks|nat|redirect|exclude|range|keepalive|session|framing|packet|payload|encrypt|obfs|udp' strings.txt | head -n 150
+            echo "=== CANDIDATE SYMBOLS (main package, first 200) ==="
+            grep -E ' main\.' symbols.txt | head -n 200
+            echo "=== CANDIDATE SYMBOLS (net io, first 200) ==="
+            grep -iE 'Listen|Dial|Serve|Udp|UDP|packet|Packet|auth|Auth|password|Password' symbols.txt \
+              | grep -vE 'runtime|internal/|itab' | head -n 200
+          } | tee FINDINGS.txt
+
+      - name: Optional targeted disassembly
+        if: ${{ inputs.disassemble != '' }}
+        env:
+          SYMS_INPUT: ${{ inputs.disassemble }}
+        run: |
+          cd evidence
+          : > disasm.txt
+          IFS=',' read -ra SYMS <<< "$SYMS_INPUT"
+          for s in "${SYMS[@]}"; do
+            [ -z "$s" ] && continue
+            echo "=== objdump -s '$s' ===" >> disasm.txt
+            go tool objdump -s "$s" bin/target-binary >> disasm.txt 2>&1 \
+              || echo "(objdump failed for '$s')" >> disasm.txt
+          done
+
+      - name: Upload text evidence (never the binary)
+        uses: actions/upload-artifact@v4
+        with:
+          name: udp-custom-analysis
+          path: |
+            evidence/FINDINGS.txt
+            evidence/sha256.txt
+            evidence/file.txt
+            evidence/elf-header.txt
+            evidence/go-buildinfo.txt
+            evidence/symbols.txt
+            evidence/strings.txt
+            evidence/disasm.txt
+            evidence/upstream-commit.json
+            evidence/config/
+          if-no-files-found: error
