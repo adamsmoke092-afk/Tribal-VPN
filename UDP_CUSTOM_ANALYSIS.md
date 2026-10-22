@@ -81,10 +81,31 @@ follow-ups once the symbol inventory names candidates).
 Artifacts: `udp-custom-analysis` (target evidence) and
 `udp-custom-siblings` (sibling inventory) — text only.
 
+**Error-handling contract (2026-10-22 revision):** GitHub Actions runs
+steps with an implicit `bash -e`, which killed the first Phase 1B run the
+moment GoReSym returned its (expected) exit 1 on the stripped binary. The
+GoReSym logic now lives in `scripts/goresym-recovery.sh` — a separate bash
+process that cannot be killed that way. Expected analyzer failures never
+fail the run; they preserve both attempts' stdout, stderr, all exit codes,
+the carved Go version, and every jq parse outcome, and record the outcome
+as `RECOVERED` or `NO-METADATA` in `analysis-status.txt`. An analyzer
+output that is a JSON error object is treated as NOT recovered. Genuine
+infrastructure or integrity failures (download errors, digest mismatches,
+missing analyzer) still fail the run loudly. Upload steps run
+`if: !cancelled()` so collected evidence survives unexpected failures. A
+`selftest` job proves the contract on every dispatch: a mock analyzer
+that exits 1 with a JSON error object must leave `NO-METADATA`, both exit
+codes, and its stderr intact.
+
 ## Status
 
-- Static-analysis findings: Phase 1 done (identity + strings); Phase 1B
-  (GoReSym metadata recovery + sibling inventory) pending first run.
+- Static-analysis findings: Phase 1 done (identity + strings). Phase 1B
+  run 1 (2026-10-22) failed on a workflow bug — the runner's implicit
+  `bash -e` terminated the step at GoReSym's expected exit 1 before the
+  fallback or findings ran; **no analyzer diagnostic from the target was
+  produced**. Fixed: recovery extracted to `scripts/goresym-recovery.sh`
+  with failure-tolerant capture + a mock-analyzer selftest job. Awaiting
+  rerun for the actual GoReSym verdict on the binary.
 - Client implementation: **not started** — blocked on the unresolved
   questions above. No guessed protocol will be written.
 - End-to-end compatibility: **not claimed**.
