@@ -1,17 +1,28 @@
 name: UDP Custom protocol analysis
 
-# Phase 1 protocol discovery - STATIC ANALYSIS ONLY.
+# Static protocol discovery - PHASE 1B.
 #
-# This workflow NEVER executes the downloaded binary. Every tool below
-# (sha256sum, file, readelf, go version -m, go tool nm, strings,
-# go tool objdump) only READS the file. The binary itself is never uploaded
-# as an artifact - only derived text evidence is.
+# This workflow NEVER executes the downloaded TARGET binary. The analyzer
+# (GoReSym, pinned to an immutable release with a verified SHA-256) is the
+# only program that runs, and it only READS the target. The target binary
+# itself is never uploaded as an artifact - only derived text evidence.
 #
-# Reproducibility: the default inputs pin the canonical repo
-# (http-custom/udp-custom) to the immutable commit SHA below. Two runs at
-# the same ref must produce the same SHA-256; the recorded hash IS the
-# verification. To analyze a different official repo (e.g. http-custom/udp,
-# udphc, udpcustom, udp_custom), change BOTH "repo" and "ref" together.
+# Pins (verified 2026-10-22):
+#   target   http-custom/udp-custom @ fcf839259e623af001cfa85fe1e1e343c58df264
+#   binary   bin/udp-custom-linux-amd64
+#            sha256 2a1b5584c7947feb5a02e847e09795751024f63ce7137a353c2b9c2a4282d636
+#   analyzer GoReSym v3.4.1
+#            sha256 a557124857f95a589f8ce3525119c2d18c7c7fc7c4225c92ff94e3effb38748d
+#   siblings http-custom/udp        @ ccd5ffec4484b191478cf094b128a3268ff3beda
+#            http-custom/udphc      @ 9e5333fd6b2b2390c6396a90ab487d3ce5e29b65
+#            http-custom/udpcustom  @ 5f0443c2f9374fcc5350d6e495ecd27074c527e3
+#            http-custom/udp_custom @ a9b0a06269618a9183dcf9ea367164755b0fe2c2
+#
+# Phase 1 run result: target is ELF x86-64, statically linked, NO section
+# header table - so nm/go tool nm found nothing and `go version -m` failed.
+# GoReSym recovers metadata from stripped/section-less Go binaries by
+# parsing the pclntab directly; that is the purpose of this revision.
+# Strings and recovered symbols are LEADS, not proof of the wire protocol.
 
 on:
   workflow_dispatch:
@@ -28,10 +39,19 @@ on:
         description: "Path to the server binary inside that repo"
         required: false
         default: "bin/udp-custom-linux-amd64"
+      expected_sha256:
+        description: "Verified target SHA-256; empty = record-only (no verify)"
+        required: false
+        default: "2a1b5584c7947feb5a02e847e09795751024f63ce7137a353c2b9c2a4282d636"
       disassemble:
         description: "Optional comma-separated Go symbol regexes to disassemble"
         required: false
         default: ""
+      analyze_siblings:
+        description: "Also inventory the four sibling UDP repos at their pinned SHAs"
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   analyze:
@@ -41,7 +61,8 @@ jobs:
         run: |
           uname -a
           go version
-          command -v sha256sum file strings readelf objdump nm
+          jq --version
+          command -v sha256sum file strings readelf objdump nm unzip
 
       - name: Download pinned upstream artifacts
         env:
@@ -60,53 +81,145 @@ jobs:
           curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/commits/${UPSTREAM_REF}" -o evidence/upstream-commit.json
           echo "(no disassembly requested)" > evidence/disasm.txt
 
-      - name: Identity (sha256 and file type)
+      - name: Identity and SHA-256 verification
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha256 }}
         run: |
           cd evidence
-          sha256sum bin/target-binary | tee sha256.txt
+          actual=$(sha256sum bin/target-binary | awk '{print $1}')
+          echo "$actual  bin/target-binary" | tee sha256.txt
           file bin/target-binary | tee file.txt
           readelf -h bin/target-binary > elf-header.txt 2>&1 || true
+          readelf -S bin/target-binary > elf-sections.txt 2>&1 || true
+          echo "expected=$EXPECTED_SHA actual=$actual"
+          if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "$actual" ]; then
+            echo "::error::Target SHA-256 mismatch - refusing to analyze a different binary than the pinned one"
+            exit 1
+          fi
+          echo "SHA-256 VERIFIED against pin" | tee -a sha256.txt
 
-      - name: Go build metadata
+      - name: Go buildinfo attempt (recorded, may fail on stripped binaries)
         run: |
           cd evidence
           go version -m bin/target-binary > go-buildinfo.txt 2>&1 || {
-            echo "(go version -m failed - not a Go binary or buildinfo stripped)" > go-buildinfo.txt
+            echo "(go version -m failed - buildinfo stripped or absent)" > go-buildinfo.txt
           }
 
-      - name: Symbol inventory
+      - name: GoReSym metadata recovery (analyzer runs, target is only read)
+        env:
+          GORESYM_URL: https://github.com/mandiant/GoReSym/releases/download/v3.4.1/GoReSym-linux.zip
+          GORESYM_SHA256: a557124857f95a589f8ce3525119c2d18c7c7fc7c4225c92ff94e3effb38748d
         run: |
+          set -uo pipefail
           cd evidence
-          go tool nm bin/target-binary > symbols.txt 2>/dev/null \
-            || nm bin/target-binary > symbols.txt 2>/dev/null \
-            || echo "(no symbol table - stripped)" > symbols.txt
-          wc -l symbols.txt
+          curl -fsSL "$GORESYM_URL" -o GoReSym-linux.zip
+          echo "$GORESYM_SHA256  GoReSym-linux.zip" | sha256sum -c - || {
+            echo "::error::GoReSym archive digest mismatch"; exit 1; }
+          echo "analyzer=GoReSym v3.4.1 sha256=$GORESYM_SHA256" > analyzer.txt
+          rm -rf goresym-bin && mkdir -p goresym-bin
+          unzip -o GoReSym-linux.zip -d goresym-bin >/dev/null
+          goresym_exe=$(find goresym-bin -maxdepth 2 -type f -iname 'GoReSym*' | head -n 1)
+          [ -n "$goresym_exe" ] || { echo "::error::GoReSym executable not found in archive"; exit 1; }
+          chmod +x "$goresym_exe"
+          # Default-empty outputs so every later reference exists even on
+          # total recovery failure.
+          : > goresym-full.json
+          : > goresym-human.txt
+          : > goresym-keys.txt
+          : > goresym-summary.txt
+          : > goresym-stderr.txt
+          : > goresym-files.txt
+          : > user-functions.txt
+          : > std-functions.txt
+          echo "Full recovery (-t -d -p -strings):"
+          "$goresym_exe" -t -d -p -strings bin/target-binary > goresym-full.json 2> goresym-stderr.txt
+          recovered=$?
+          if [ ! -s goresym-full.json ]; then
+            echo "(first GoReSym pass produced no output)" >> goresym-stderr.txt
+            # Carve a Go version string from the raw bytes and retry with -v
+            # (README: -v is needed for some stripped binaries where version
+            # auto-detection fails). The carved string is evidence, not a guess.
+            carved=$(grep -aoE 'go1\.[0-9]+(\.[0-9]+)?' bin/target-binary | sort | uniq -c | sort -rn | head -n 1 | awk '{print $2}')
+            if [ -n "$carved" ]; then
+              echo "retry with -v ${carved#go}" >> goresym-stderr.txt
+              "$goresym_exe" -v "${carved#go}" -t -d -p -strings bin/target-binary \
+                > goresym-full.json 2>> goresym-stderr.txt || true
+            fi
+          fi
+          if [ -s goresym-full.json ]; then
+            jq -r 'keys' goresym-full.json > goresym-keys.txt 2>/dev/null || true
+            jq -r '[.Version? // "unknown", .BuildId? // "none", .Arch? // "unknown"] | @tsv' \
+              goresym-full.json > goresym-summary.txt 2>/dev/null || true
+            jq -r '.UserFunctions[]? | [(.StartAddress // 0 | tostring),
+                     (.FullFuncName // .FuncName // .Name // "?")] | @tsv' \
+              goresym-full.json > user-functions.txt 2>/dev/null || true
+            jq -r '.StdFunctions[]? | [(.StartAddress // 0 | tostring),
+                     (.FullFuncName // .FuncName // .Name // "?")] | @tsv' \
+              goresym-full.json > std-functions.txt 2>/dev/null || true
+            jq -r '.Files[]? | tostring' goresym-full.json > goresym-files.txt 2>/dev/null || true
+            "$goresym_exe" -human -t -d -p bin/target-binary \
+              > goresym-human.txt 2>&1 || true
+          else
+            echo "(GoReSym could not recover metadata - see goresym-stderr.txt)" > goresym-summary.txt
+          fi
+          echo "goresym exit=$recovered"
 
-      - name: Strings inventory
+      - name: Raw strings inventory (language evidence, independent of GoReSym)
         run: |
           cd evidence
           strings -n 8 bin/target-binary > strings.txt
           wc -l strings.txt
+          grep -aoE 'go1\.[0-9]+(\.[0-9]+)?' bin/target-binary \
+            | sort | uniq -c | sort -rn | head -n 10 > go-version-carve.txt || true
 
       - name: Findings summary (printed to the run log)
         run: |
           cd evidence
+          cat > UNRESOLVED.txt <<'EOF'
+          The following are NOT established by strings or symbols - each
+          needs disassembly-level or traffic-level evidence:
+          1. Transport of the client-facing listener on :36712 (TCP or UDP).
+          2. Connection sequence and session establishment from the client.
+          3. Authentication handshake: message format, credential encoding,
+             and how the server provisions the passwords (config "mode":
+             "passwords").
+          4. Message framing and packet encoding of the client protocol.
+          5. Failure behaviour: refused credentials, expired accounts,
+             idle disconnects, keepalives.
+          6. How the 1-65535 range routes traffic to the core (udp-request
+             catcher vs in-binary multi-port listen) per stack generation.
+          7. Which stack generation the user's provider actually runs
+             (2023 udp-custom vs the 2024 sibling repos).
+          EOF
           {
             echo "=== UPSTREAM PIN ==="
             grep -m1 '"sha"' upstream-commit.json || true
-            echo "=== SHA-256 ==="
+            echo "=== TARGET SHA-256 (verified against pin) ==="
             cat sha256.txt
-            echo "=== FILE TYPE ==="
+            echo "=== FILE TYPE / ARCH ==="
             cat file.txt
-            echo "=== GO BUILDINFO (first 60 lines) ==="
-            head -n 60 go-buildinfo.txt
+            echo "=== ANALYZER ==="
+            cat analyzer.txt
+            echo "=== GOReSYM SUMMARY (Version/BuildId/Arch) ==="
+            cat goresym-summary.txt 2>/dev/null || echo "(none)"
+            cat goresym-keys.txt 2>/dev/null | head -n 5 || true
+            echo "=== GO VERSION CARVE (raw bytes) ==="
+            cat go-version-carve.txt 2>/dev/null || echo "(no go1.x strings)"
+            echo "=== GO BUILDINFO ATTEMPT ==="
+            cat go-buildinfo.txt
+            echo "=== RECOVERED USER FUNCTIONS (count + first 80) ==="
+            wc -l user-functions.txt 2>/dev/null || echo "0 user-functions.txt"
+            head -n 80 user-functions.txt 2>/dev/null || true
+            echo "=== NET / AUTH / FRAMING CANDIDATE FUNCTIONS (with addresses) ==="
+            grep -iE 'listen|dial|serve|udp|packet|auth|password|session|handle|handshake|frame|conn|nat|redirect' \
+              user-functions.txt 2>/dev/null | head -n 120 || echo "(no user functions recovered)"
+            echo "=== EMBEDDED SOURCE PATHS (first 40) ==="
+            head -n 40 goresym-files.txt 2>/dev/null || true
+            grep -E '\.go$|/app/cmd/|/udp-custom/' strings.txt | head -n 40
             echo "=== PROTOCOL-RELEVANT STRINGS (first 150 hits) ==="
             grep -inE 'password|auth|login|token|handshake|listen|36712|7800|7300|udpgw|socks|nat|redirect|exclude|range|keepalive|session|framing|packet|payload|encrypt|obfs|udp' strings.txt | head -n 150
-            echo "=== CANDIDATE SYMBOLS (main package, first 200) ==="
-            grep -E ' main\.' symbols.txt | head -n 200
-            echo "=== CANDIDATE SYMBOLS (net io, first 200) ==="
-            grep -iE 'Listen|Dial|Serve|Udp|UDP|packet|Packet|auth|Auth|password|Password' symbols.txt \
-              | grep -vE 'runtime|internal/|itab' | head -n 200
+            echo "=== UNRESOLVED PROTOCOL QUESTIONS ==="
+            cat UNRESOLVED.txt
           } | tee FINDINGS.txt
 
       - name: Optional targeted disassembly
@@ -124,19 +237,99 @@ jobs:
               || echo "(objdump failed for '$s')" >> disasm.txt
           done
 
-      - name: Upload text evidence (never the binary)
+      - name: Upload text evidence (never the target binary)
         uses: actions/upload-artifact@v4
         with:
           name: udp-custom-analysis
           path: |
             evidence/FINDINGS.txt
+            evidence/UNRESOLVED.txt
             evidence/sha256.txt
             evidence/file.txt
             evidence/elf-header.txt
+            evidence/elf-sections.txt
+            evidence/analyzer.txt
             evidence/go-buildinfo.txt
-            evidence/symbols.txt
+            evidence/go-version-carve.txt
+            evidence/goresym-full.json
+            evidence/goresym-human.txt
+            evidence/goresym-keys.txt
+            evidence/goresym-summary.txt
+            evidence/goresym-stderr.txt
+            evidence/goresym-files.txt
+            evidence/user-functions.txt
+            evidence/std-functions.txt
             evidence/strings.txt
             evidence/disasm.txt
             evidence/upstream-commit.json
             evidence/config/
+          if-no-files-found: error
+
+  siblings:
+    if: ${{ inputs.analyze_siblings }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inventory pinned sibling repos (metadata only, binaries hashed then deleted)
+        run: |
+          set -uo pipefail
+          mkdir -p evidence/siblings
+          analyze_repo() {
+            local repo="$1" sha="$2"
+            local dir="evidence/siblings/$repo"
+            mkdir -p "$dir"
+            echo "repo=$repo sha=$sha" | tee "$dir/PIN.txt"
+            local files="$dir/filelist.tsv"
+            : > "$files"
+            for sub in "" "bin" "module" "config"; do
+              local idx="${sub:-root}"
+              local url="https://api.github.com/repos/http-custom/$repo/contents"
+              [ -n "$sub" ] && url="$url/$sub"
+              if curl -fsSL "$url?ref=$sha" -o "$dir/contents-$idx.json" 2>/dev/null; then
+                jq -r '.[]? | select(.type=="file") | "\(.path)\t\(.size)\t\(.download_url)"' \
+                  "$dir/contents-$idx.json" >> "$files" 2>/dev/null || true
+              fi
+            done
+            sort -u "$files" -o "$files" || true
+            while IFS=$'\t' read -r path size url; do
+              [ -z "${path:-}" ] && continue
+              local safe
+              safe=$(printf '%s' "$path" | tr '/' '_')
+              if ! curl -fsSL "$url" -o "$dir/item_$safe"; then
+                echo "download failed: $repo $path" >> "$dir/FAILED.txt"
+                continue
+              fi
+              sha256sum "$dir/item_$safe" | sed "s# .*/# $repo/$path#" | tee -a "$dir/SHA256.txt"
+              file -b "$dir/item_$safe" | sed "s#^#$repo/$path: #" | tee -a "$dir/FILE.txt"
+              if [ "${size:-0}" -gt 500000 ]; then
+                strings -n 8 "$dir/item_$safe" \
+                  | grep -iE 'password|auth|handshake|listen|udpgw|socks|keepalive|frame|packet|session|go1\.[0-9]|36712|7800' \
+                  | head -n 40 >> "$dir/BIG-STRINGS.txt" || true
+                rm -f "$dir/item_$safe"
+              fi
+            done < "$files"
+          }
+          analyze_repo udp        ccd5ffec4484b191478cf094b128a3268ff3beda
+          analyze_repo udphc      9e5333fd6b2b2390c6396a90ab487d3ce5e29b65
+          analyze_repo udpcustom  5f0443c2f9374fcc5350d6e495ecd27074c527e3
+          analyze_repo udp_custom a9b0a06269618a9183dcf9ea367164755b0fe2c2
+
+      - name: Sibling summary (printed to the run log)
+        run: |
+          cd evidence/siblings
+          for d in */; do
+            repo="${d%/}"
+            echo "=== $repo ==="
+            cat "$d/PIN.txt" 2>/dev/null || true
+            echo "-- files listed: $(wc -l < "$d/filelist.tsv" 2>/dev/null || echo 0)"
+            echo "-- executables/architectures:"
+            grep -E 'ELF|Mach|PE32|executable' "$d/FILE.txt" 2>/dev/null | head -n 8 || echo "   (none)"
+            echo "-- protocol-relevant strings from big files:"
+            head -n 20 "$d/BIG-STRINGS.txt" 2>/dev/null || echo "   (none)"
+          done | tee ../SIBLINGS-FINDINGS.txt
+
+      - name: Upload sibling text evidence (binaries were deleted, never uploaded)
+        uses: actions/upload-artifact@v4
+        with:
+          name: udp-custom-siblings
+          path: evidence/siblings/
           if-no-files-found: error
