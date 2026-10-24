@@ -97,6 +97,41 @@ jobs:
           grep -q 'simulated parsing failure'  selftest/out/goresym-stderr.txt
           echo "SELFTEST PASSED: analyzer exit 1 preserved, recovery continued, evidence intact"
 
+      - name: Mock unstrip resilience test (nonzero analyzer exits must not kill the step)
+        run: |
+          set -euo pipefail
+          cat > selftest/mock-unstrip.sh <<'EOF'
+          #!/usr/bin/env bash
+          case "$*" in
+            *--help*)
+              echo "mock unstrip help"
+              echo "  --info       container info"
+              echo "  --buildinfo  build metadata"
+              echo "  --capabilities capability report"
+              echo "  --detect-garble garble verdict"
+              exit 0
+              ;;
+            *)
+              echo "mock-unstrip: simulated parse failure" >&2
+              exit 1
+              ;;
+          esac
+          EOF
+          chmod +x selftest/mock-unstrip.sh
+          bash scripts/unstrip-analysis.sh \
+            "$PWD/selftest/mock-unstrip.sh" \
+            "$PWD/selftest/mock-target.bin" \
+            "$PWD/selftest/unstrip-out" || {
+            echo "FAIL: unstrip-analysis.sh exited nonzero on analyzer failures"; exit 1; }
+          echo "--- exit codes:"; cat selftest/unstrip-out/exit-codes-summary.txt
+          echo "--- garble:";     cat selftest/unstrip-out/unstrip-garble-interpretation.txt
+          grep -q 'functions|rc=1'    selftest/unstrip-out/exit-codes-summary.txt
+          grep -q 'info|rc=1'         selftest/unstrip-out/exit-codes-summary.txt
+          grep -q 'CLEAN'             selftest/unstrip-out/unstrip-garble-interpretation.txt
+          grep -q 'simulated parse failure' selftest/unstrip-out/unstrip-functions.stderr.txt
+          grep -q -- '--detect-garble' selftest/unstrip-out/unstrip-help.txt
+          echo "SELFTEST PASSED (unstrip): nonzero exits preserved, garble semantics applied"
+
   analyze:
     needs: selftest
     runs-on: ubuntu-latest
@@ -372,4 +407,201 @@ jobs:
         with:
           name: udp-custom-siblings
           path: evidence/siblings/
+          if-no-files-found: error
+
+  phase2-unstrip:
+    # Independent parser for the pclntab question: GoReSym reported
+    # "no valid pclntab found"; unstrip (riven-labs, Rust) uses a
+    # different recovery strategy (magic-byte scan fallback for stripped,
+    # section-less ELFs) and supports Go 1.18-1.25, including
+    # garble-obfuscated binaries. Static analysis only - the target is
+    # never executed, and Phase 1 evidence is untouched.
+    needs: selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pinned target and enforce SHA-256 (identity before analysis)
+        env:
+          UPSTREAM_REPO: ${{ inputs.repo }}
+          UPSTREAM_REF: ${{ inputs.ref }}
+          UPSTREAM_BIN: ${{ inputs.binary_path }}
+          EXPECTED_SHA: ${{ inputs.expected_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p phase2
+          curl -fsSL "https://raw.githubusercontent.com/${UPSTREAM_REPO}/${UPSTREAM_REF}/${UPSTREAM_BIN}" \
+            -o phase2/target-binary
+          cd phase2
+          actual=$(sha256sum target-binary | awk '{print $1}')
+          {
+            echo "repo=${UPSTREAM_REPO}"
+            echo "ref=${UPSTREAM_REF}"
+            echo "binary_path=${UPSTREAM_BIN}"
+            echo "expected_sha256=${EXPECTED_SHA}"
+            echo "actual_sha256=${actual}"
+          } > target-sha256.txt
+          if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "$actual" ]; then
+            echo "verdict=MISMATCH - analysis refused" >> target-sha256.txt
+            echo "::error::Target SHA-256 mismatch - refusing to analyze"
+            exit 1
+          fi
+          echo "verdict=MATCH - verified against the pinned SHA-256 before any analysis" >> target-sha256.txt
+          cat target-sha256.txt
+
+      - name: Acquire pinned unstrip v1.2.0 (dual digest verification)
+        env:
+          UNSTRIP_TARBALL: unstrip-v1.2.0-x86_64-unknown-linux-gnu.tar.gz
+          UNSTRIP_URL: https://github.com/riven-labs/unstrip/releases/download/v1.2.0/unstrip-v1.2.0-x86_64-unknown-linux-gnu.tar.gz
+          UNSTRIP_SHA256: a6268afce24e6abdbd8172d5a61174e198864d997c1cd70cc5e002c055d92667
+          UNSTRIP_SUMS_URL: https://github.com/riven-labs/unstrip/releases/download/v1.2.0/SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd phase2
+          curl -fsSL "$UNSTRIP_URL" -o "$UNSTRIP_TARBALL"
+          {
+            echo "tool=riven-labs/unstrip"
+            echo "release=v1.2.0"
+            echo "asset=$UNSTRIP_TARBALL"
+            echo "source_identifier=github.com/riven-labs/unstrip release v1.2.0"
+            echo "verification=github release API digest + release SHA256SUMS + local sha256sum"
+          } > tool-version.txt
+          {
+            echo "# source 1: GitHub release API digest"
+            if echo "$UNSTRIP_SHA256  $UNSTRIP_TARBALL" | sha256sum -c -; then
+              echo "api_digest=VERIFIED"
+            else
+              echo "api_digest=MISMATCH"
+              echo "::error::unstrip archive digest mismatch (release API)"
+              exit 1
+            fi
+            echo "# source 2: the release's own SHA256SUMS file"
+            if curl -fsSL "$UNSTRIP_SUMS_URL" -o SHA256SUMS &&
+               grep " $UNSTRIP_TARBALL\$" SHA256SUMS > sums-line.txt &&
+               sha256sum -c sums-line.txt; then
+              echo "sha256sums_file=VERIFIED"
+            else
+              echo "sha256sums_file=NOT-VERIFIABLE (recorded; the API digest was already enforced)"
+            fi
+          } > tool-sha256.txt
+          tar -tzf "$UNSTRIP_TARBALL" > tool-contents.txt
+          mkdir -p tool
+          tar -xzf "$UNSTRIP_TARBALL" -C tool
+          unstrip_exe=$(find tool -type f -name 'unstrip' | head -n 1)
+          if [ -z "$unstrip_exe" ]; then
+            echo "::error::unstrip executable not found in archive"
+            cat tool-contents.txt
+            exit 1
+          fi
+          chmod +x "$unstrip_exe"
+          sha256sum "$unstrip_exe" | sed 's# .*/#  #' >> tool-sha256.txt
+          echo "$PWD/$unstrip_exe" > unstrip-path.txt
+          cat tool-version.txt tool-sha256.txt
+
+      - name: unstrip static analysis (help-first, exit-code safe)
+        run: |
+          set -euo pipefail
+          cd phase2
+          exe=$(cat unstrip-path.txt)
+          bash "$GITHUB_WORKSPACE/scripts/unstrip-analysis.sh" "$exe" "$PWD/target-binary" "$PWD"
+          echo "--- exit codes:";  cat exit-codes-summary.txt
+          echo "--- garble:";      cat unstrip-garble-interpretation.txt
+
+      - name: ELF inspection (actual outputs preserved)
+        run: |
+          set -euo pipefail
+          cd phase2
+          file target-binary > file.txt
+          readelf -h -l -S target-binary > readelf.txt 2>&1 || true
+          objdump -f target-binary > objdump-file-format.txt 2>&1 || true
+
+      - name: Function candidates (metadata leads only)
+        run: |
+          set -euo pipefail
+          cd phase2
+          {
+            echo "# Candidate functions - LEADS ONLY. Recovered names and"
+            echo "# addresses are parser-reported metadata, not proof of behavior."
+            if [ -s unstrip-functions.txt ]; then
+              echo "# recovered listing lines: $(wc -l < unstrip-functions.txt)"
+              grep -inE 'net|udp|tcp|ssh|auth|passw|login|token|encrypt|decrypt|crypto|tls|packet|socket|conn|session|listen|dial|proxy|tunnel|dns|config|parse|frame' \
+                unstrip-functions.txt | head -n 200 || true
+            else
+              echo "# NO FUNCTIONS RECOVERED - candidates are not derivable from metadata."
+              echo "# See unstrip-functions.stderr.txt for the tool's exact diagnostic."
+            fi
+          } > function-candidates.txt
+          cat function-candidates.txt
+
+      - name: PHASE2_REPORT.md assembly
+        run: |
+          set -euo pipefail
+          cd phase2
+          cat > UNRESOLVED-PHASE2.txt <<'EOF'
+          Standing protocol questions (unchanged from Phase 1):
+            1. Transport of the client-facing listener on :36712 (TCP or UDP).
+            2. Connection sequence and session establishment from the client.
+            3. Authentication handshake and credential encoding.
+            4. Message framing and packet encoding.
+            5. Failure behaviour (bad credentials, expiry, idle, keepalives).
+            6. How the 1-65535 range routes traffic to the core.
+            7. Which stack generation the user's provider runs.
+          Next-blocker branches:
+            A. If unstrip recovered functions: next = targeted review and
+               disassembly of candidates (addresses above), then translate
+               findings into the protocol questions.
+            B. If no pclntab and no functions again: the Go-metadata route is
+               exhausted. Program headers ARE present (readelf.txt), so raw
+               executable-segment disassembly is technically feasible but
+               yields unlabeled assembly. The strongest remaining route to
+               the wire protocol is a packet capture of HTTP Custom's own
+               UDP traffic from the device.
+          EOF
+          {
+            echo "# Phase 2 report - unstrip static analysis"
+            echo
+            echo "## Target integrity"
+            cat target-sha256.txt
+            echo
+            echo "## Tool"
+            cat tool-version.txt
+            echo
+            cat tool-sha256.txt
+            echo
+            echo "## Invocations (name|rc|args)"
+            cat exit-codes-summary.txt
+            echo
+            echo "## Garble verdict"
+            cat unstrip-garble-interpretation.txt
+            echo
+            echo "## Function recovery"
+            if [ -s unstrip-functions.txt ]; then
+              echo "recovered listing lines: $(wc -l < unstrip-functions.txt)"
+              head -n 15 unstrip-functions.txt
+            else
+              echo "NO FUNCTIONS RECOVERED - see unstrip-functions.stderr.txt"
+            fi
+            echo
+            echo "## ELF"
+            cat file.txt
+            grep -m1 -E 'Entry point|Machine' readelf.txt || true
+            echo
+            echo "## Networking leads"
+            head -n 40 function-candidates.txt
+            echo
+            echo "## Next blocker"
+            cat UNRESOLVED-PHASE2.txt
+          } > PHASE2_REPORT.md
+          head -n 80 PHASE2_REPORT.md
+
+      - name: Upload Phase 2 evidence (text only - never the target binary or the tool)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: udp-custom-phase2
+          path: |
+            phase2/**
+            !phase2/target-binary
+            !phase2/unstrip-v1.2.0-x86_64-unknown-linux-gnu.tar.gz
+            !phase2/tool/**
           if-no-files-found: error
