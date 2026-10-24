@@ -99,13 +99,15 @@ codes, and its stderr intact.
 
 ## Status
 
-- Static-analysis findings: Phase 1 done (identity + strings). Phase 1B
-  run 1 (2026-10-22) failed on a workflow bug — the runner's implicit
-  `bash -e` terminated the step at GoReSym's expected exit 1 before the
-  fallback or findings ran; **no analyzer diagnostic from the target was
-  produced**. Fixed: recovery extracted to `scripts/goresym-recovery.sh`
-  with failure-tolerant capture + a mock-analyzer selftest job. Awaiting
-  rerun for the actual GoReSym verdict on the binary.
+- Static-analysis findings: Phase 1 done (identity + strings). **Phase 1B
+  run 2 (resilience-fixed) completed — all jobs green; GoReSym v3.4.1
+  returned `{"error": "Failed to parse file: no valid pclntab found"}`,
+  original and retry exit codes both 1, zero user functions recovered.**
+  The pclntab question is now delegated to an independent second parser:
+  unstrip (riven-labs) v1.2.0, wired as the `phase2-unstrip` job
+  (`scripts/unstrip-analysis.sh`) with dual-digest tool verification,
+  help-first flag gating, per-invocation exit-code capture, and a
+  mock-unstrip selftest. Awaiting dispatch for the actual unstrip results.
 - Client implementation: **not started** — blocked on the unresolved
   questions above. No guessed protocol will be written.
 - End-to-end compatibility: **not claimed**.
