@@ -22,6 +22,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tribal.vpn.data.VpnConfig
+import com.tribal.vpn.xray.XrayConfigManager
 import java.util.UUID
 
 private val Gold = Color(0xFFF5B700)
@@ -44,6 +45,10 @@ fun EditProfileScreen(
     onDone: () -> Unit
 ) {
     val isNew = existing == null
+    // Engine selection. SSH keeps the original profile shape (host + auth);
+    // Xray hides those fields and takes a pasted Xray JSON config instead.
+    var engine by remember { mutableStateOf(existing?.engine ?: VpnConfig.VpnEngine.SSH) }
+    var xrayConfig by remember { mutableStateOf(existing?.xrayConfig ?: "") }
     var name by remember { mutableStateOf(existing?.name ?: "") }
     var host by remember { mutableStateOf(existing?.host ?: "") }
     // Both port boxes start EMPTY every time the screen opens. Empty means
@@ -73,32 +78,40 @@ fun EditProfileScreen(
     fun validate(): Boolean {
         val e = mutableMapOf<String, String>()
         if (name.isBlank()) e["name"] = "Give this profile a name"
-        if (host.isBlank()) e["host"] = "Host is required"
-        if (username.isBlank()) e["username"] = "Username is required"
-        if (authMethod == VpnConfig.AuthMethod.PASSWORD && password.isBlank()) {
-            e["password"] = "Password is required"
+        if (engine == VpnConfig.VpnEngine.XRAY) {
+            // An Xray profile has no SSH endpoint - what must be valid is its
+            // config. The validator is the same one VpnConfig.isValid uses,
+            // so the UI can never save something connect() would refuse.
+            XrayConfigManager.validateStructured(xrayConfig)?.let { e["xrayConfig"] = it }
+        } else {
+            if (host.isBlank()) e["host"] = "Host is required"
+            if (username.isBlank()) e["username"] = "Username is required"
+            if (authMethod == VpnConfig.AuthMethod.PASSWORD && password.isBlank()) {
+                e["password"] = "Password is required"
+            }
+            // Empty port boxes are legal (they keep the stored value); a
+            // filled box must be valid for ITS protocol. A bare number in the
+            // UDP box is an error, so it can never become the SSH port.
+            if (udpRange.isNotBlank() &&
+                (!udpRange.contains('-') || VpnConfig.parsePortRange(udpRange) == null)
+            ) {
+                e["port"] = "Use a range like 1-65535"
+            }
+            if (sshPort.isBlank() && existing == null) {
+                // No silent 22: a new profile must state its server's real SSH
+                // port. Empty on an existing profile keeps the stored port.
+                e["sshPort"] = "SSH port is required"
+            }
+            if (sshPort.isNotBlank() && VpnConfig.parsePort(sshPort) == null) {
+                e["sshPort"] = "SSH port must be a number from 1 to 65535"
+            }
+            if (VpnConfig.parsePort(udpPort) == null) {
+                e["udpPort"] = "udpgw port must be a number from 1 to 65535"
+            }
         }
-        // Empty port boxes are legal (they keep the stored value); a
-        // filled box must be valid for ITS protocol. A bare number in the
-        // UDP box is an error, so it can never become the SSH port.
-        if (udpRange.isNotBlank() &&
-            (!udpRange.contains('-') || VpnConfig.parsePortRange(udpRange) == null)
-        ) {
-            e["port"] = "Use a range like 1-65535"
-        }
-        if (sshPort.isBlank() && existing == null) {
-            // No silent 22: a new profile must state its server's real SSH
-            // port. Empty on an existing profile keeps the stored port.
-            e["sshPort"] = "SSH port is required"
-        }
-        if (sshPort.isNotBlank() && VpnConfig.parsePort(sshPort) == null) {
-            e["sshPort"] = "SSH port must be a number from 1 to 65535"
-        }
+        // MTU applies to both engines (it is the tun/VpnService MTU).
         if (mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 } == null) {
             e["mtu"] = "MTU must be a number from 68 to 65535"
-        }
-        if (VpnConfig.parsePort(udpPort) == null) {
-            e["udpPort"] = "udpgw port must be a number from 1 to 65535"
         }
         // MapDNS needs exactly one DNS address to intercept, and a valid
         // contiguous fake-IP pool - validated, never silently defaulted.
@@ -124,25 +137,35 @@ fun EditProfileScreen(
         // if the fields somehow changed between validate() and here.
         // Empty box = keep the stored value (defaults for a new profile);
         // filled box = the parsed value. Nothing silently overwritten.
-        val range = if (udpRange.isNotBlank()) VpnConfig.parsePortRange(udpRange) else null
-        if (udpRange.isNotBlank() && (range == null || !udpRange.contains('-'))) {
-            errors = errors + ("port" to "Use a range like 1-65535")
-            return
-        }
-        val portNum = if (sshPort.isBlank()) {
-            // Empty on an EXISTING profile keeps its stored port - never a
-            // silent 22. New profiles cannot reach this branch with a blank
-            // box: validate() requires the port when nothing is stored.
-            existing?.port ?: run {
-                errors = errors + ("sshPort" to "SSH port is required")
+        // SSH-only port fields. An Xray profile keeps the stored values: that
+        // engine does not use them, and keeping them means switching a
+        // profile's engine back to SSH later is lossless.
+        val portNum: Int
+        val rangeText: String
+        if (engine == VpnConfig.VpnEngine.SSH) {
+            val range = if (udpRange.isNotBlank()) VpnConfig.parsePortRange(udpRange) else null
+            if (udpRange.isNotBlank() && (range == null || !udpRange.contains('-'))) {
+                errors = errors + ("port" to "Use a range like 1-65535")
                 return
             }
+            portNum = if (sshPort.isBlank()) {
+                // Empty on an EXISTING profile keeps its stored port - never a
+                // silent 22. New profiles cannot reach this branch with a blank
+                // box: validate() requires the port when nothing is stored.
+                existing?.port ?: run {
+                    errors = errors + ("sshPort" to "SSH port is required")
+                    return
+                }
+            } else {
+                VpnConfig.parsePort(sshPort)
+                    ?: run { errors = errors + ("sshPort" to "SSH port must be a number from 1 to 65535"); return }
+            }
+            rangeText = range?.let { "${it.first}-${it.last}" }
+                ?: (existing?.udpPortRange ?: "1-65535")
         } else {
-            VpnConfig.parsePort(sshPort)
-                ?: run { errors = errors + ("sshPort" to "SSH port must be a number from 1 to 65535"); return }
+            portNum = existing?.port ?: 22
+            rangeText = existing?.udpPortRange ?: "1-65535"
         }
-        val rangeText = range?.let { "${it.first}-${it.last}" }
-            ?: (existing?.udpPortRange ?: "1-65535")
         val mtuNum = mtu.trim().toIntOrNull()?.takeIf { it in 68..65535 }
             ?: run { errors = errors + ("mtu" to "MTU must be a number from 68 to 65535"); return }
         val udpNum = VpnConfig.parsePort(udpPort)
@@ -163,9 +186,11 @@ fun EditProfileScreen(
         val config = VpnConfig(
             id = existing?.id ?: UUID.randomUUID().toString(),
             name = name.trim(),
+            engine = engine,
             host = host.trim(),
             port = portNum,
             username = username.trim(),
+            xrayConfig = xrayConfig,
             password = password,
             authMethod = authMethod,
             privateKeyAlias = existing?.privateKeyAlias,
@@ -213,79 +238,125 @@ fun EditProfileScreen(
             LabeledField("Profile Name", errors["name"]) {
                 GoldTextField(name, { name = it }, placeholder = "e.g. Home VPS")
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Box(Modifier.weight(2f)) {
-                    LabeledField("Host", errors["host"]) {
-                        GoldTextField(host, { host = it }, placeholder = "vps.example.com")
-                    }
-                }
-                Box(Modifier.weight(1f)) {
-                    LabeledField("Port", errors["port"]) {
-                        GoldTextField(
-                            udpRange, { udpRange = it },
-                            placeholder = "1-65535",
-                            keyboardType = KeyboardType.Number
-                        )
-                    }
-                }
-            }
-            Text(
-                "The UDP redirect list, HTTP Custom style. Leave empty to " +
-                    "keep the current value. The SSH port lives in Advanced.",
-                color = MidGray, fontSize = 11.sp
-            )
-            existing?.let {
-                Text(
-                    "Current UDP range: ${it.udpPortRange}",
-                    color = MidGray, fontSize = 11.sp
-                )
-            }
-            LabeledField("Username", errors["username"]) {
-                GoldTextField(username, { username = it }, placeholder = "root")
-            }
 
-            Text("Authentication", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(
+                "Connection Engine",
+                color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AuthMethodButton(
-                    label = "Password", icon = Icons.Filled.Lock,
-                    selected = authMethod == VpnConfig.AuthMethod.PASSWORD,
-                    onClick = { authMethod = VpnConfig.AuthMethod.PASSWORD },
+                    label = "SSH", icon = Icons.Filled.Terminal,
+                    selected = engine == VpnConfig.VpnEngine.SSH,
+                    onClick = { engine = VpnConfig.VpnEngine.SSH },
                     modifier = Modifier.weight(1f)
                 )
                 AuthMethodButton(
-                    label = "SSH Key", icon = Icons.Filled.Key,
-                    selected = authMethod == VpnConfig.AuthMethod.KEY,
-                    onClick = { authMethod = VpnConfig.AuthMethod.KEY },
+                    label = "Xray", icon = Icons.Filled.Bolt,
+                    selected = engine == VpnConfig.VpnEngine.XRAY,
+                    onClick = { engine = VpnConfig.VpnEngine.XRAY },
                     modifier = Modifier.weight(1f)
                 )
             }
 
-            if (authMethod == VpnConfig.AuthMethod.PASSWORD) {
-                LabeledField("Password", errors["password"]) {
-                    GoldTextField(
-                        value = password,
-                        onChange = { password = it },
-                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { showPassword = !showPassword }) {
-                                Icon(
-                                    if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                    contentDescription = "Toggle password visibility",
-                                    tint = MidGray
-                                )
-                            }
-                        }
+            if (engine == VpnConfig.VpnEngine.XRAY) {
+                LabeledField("Xray configuration (JSON)", errors["xrayConfig"]) {
+                    GoldTextArea(
+                        value = xrayConfig,
+                        onChange = { xrayConfig = it },
+                        placeholder = "Paste your Xray JSON config - it must contain an \"outbounds\" array"
                     )
                 }
                 Text(
-                    "Stored encrypted, unlocked with device biometrics",
+                    "Paste a full Xray JSON config. It is validated here; at connect time " +
+                        "the app adds its own loopback SOCKS5 inbound and a safe log section, " +
+                        "and uses your outbounds/routing as-is. Share links (vless://...) are " +
+                        "not supported yet.",
                     color = MidGray, fontSize = 11.sp
                 )
+                existing?.let {
+                    if (it.engine == VpnConfig.VpnEngine.XRAY && it.xrayConfig.isNotBlank()) {
+                        Text(
+                            "A config is stored (${it.xrayConfig.trim().length} chars) - " +
+                                "editing above replaces it",
+                            color = MidGray, fontSize = 11.sp
+                        )
+                    }
+                }
             } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Box(Modifier.weight(2f)) {
+                        LabeledField("Host", errors["host"]) {
+                            GoldTextField(host, { host = it }, placeholder = "vps.example.com")
+                        }
+                    }
+                    Box(Modifier.weight(1f)) {
+                        LabeledField("Port", errors["port"]) {
+                            GoldTextField(
+                                udpRange, { udpRange = it },
+                                placeholder = "1-65535",
+                                keyboardType = KeyboardType.Number
+                            )
+                        }
+                    }
+                }
                 Text(
-                    "SSH key import is not yet implemented (see README_DATA_INTEGRITY.md)",
-                    color = MidGray, fontSize = 12.sp
+                    "The UDP redirect list, HTTP Custom style. Leave empty to " +
+                        "keep the current value. The SSH port lives in Advanced.",
+                    color = MidGray, fontSize = 11.sp
                 )
+                existing?.let {
+                    Text(
+                        "Current UDP range: ${it.udpPortRange}",
+                        color = MidGray, fontSize = 11.sp
+                    )
+                }
+                LabeledField("Username", errors["username"]) {
+                    GoldTextField(username, { username = it }, placeholder = "root")
+                }
+
+                Text("Authentication", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AuthMethodButton(
+                        label = "Password", icon = Icons.Filled.Lock,
+                        selected = authMethod == VpnConfig.AuthMethod.PASSWORD,
+                        onClick = { authMethod = VpnConfig.AuthMethod.PASSWORD },
+                        modifier = Modifier.weight(1f)
+                    )
+                    AuthMethodButton(
+                        label = "SSH Key", icon = Icons.Filled.Key,
+                        selected = authMethod == VpnConfig.AuthMethod.KEY,
+                        onClick = { authMethod = VpnConfig.AuthMethod.KEY },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                if (authMethod == VpnConfig.AuthMethod.PASSWORD) {
+                    LabeledField("Password", errors["password"]) {
+                        GoldTextField(
+                            value = password,
+                            onChange = { password = it },
+                            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                            trailingIcon = {
+                                IconButton(onClick = { showPassword = !showPassword }) {
+                                    Icon(
+                                        if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = "Toggle password visibility",
+                                        tint = MidGray
+                                    )
+                                }
+                            }
+                        )
+                    }
+                    Text(
+                        "Stored encrypted, unlocked with device biometrics",
+                        color = MidGray, fontSize = 11.sp
+                    )
+                } else {
+                    Text(
+                        "SSH key import is not yet implemented (see README_DATA_INTEGRITY.md)",
+                        color = MidGray, fontSize = 12.sp
+                    )
+                }
             }
         }
 
@@ -299,7 +370,14 @@ fun EditProfileScreen(
             ) {
                 Column {
                     Text("Advanced", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("SSH Port, DNS, UDP Custom, MTU", color = MidGray, fontSize = 11.sp)
+                    Text(
+                        if (engine == VpnConfig.VpnEngine.SSH) {
+                            "SSH Port, DNS, UDP Custom, MTU"
+                        } else {
+                            "DNS, MTU (UDP is native to the Xray engine)"
+                        },
+                        color = MidGray, fontSize = 11.sp
+                    )
                 }
                 Icon(
                     if (showAdvanced) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
@@ -308,26 +386,28 @@ fun EditProfileScreen(
             }
 
             if (showAdvanced) {
-                Divider(color = CardBorder)
+                if (engine == VpnConfig.VpnEngine.SSH) {
+                    Divider(color = CardBorder)
 
-                LabeledField("SSH Port", errors["sshPort"]) {
-                    GoldTextField(
-                        sshPort, { sshPort = it },
-                        placeholder = "e.g. 22",
-                        keyboardType = KeyboardType.Number
-                    )
-                }
-                Text(
-                    "The real port your server's SSH listens on - required " +
-                        "when creating a profile. Leave empty here to keep " +
-                        "the stored one.",
-                    color = MidGray, fontSize = 11.sp
-                )
-                existing?.let {
+                    LabeledField("SSH Port", errors["sshPort"]) {
+                        GoldTextField(
+                            sshPort, { sshPort = it },
+                            placeholder = "e.g. 22",
+                            keyboardType = KeyboardType.Number
+                        )
+                    }
                     Text(
-                        "Current SSH port: ${it.port}",
+                        "The real port your server's SSH listens on - required " +
+                            "when creating a profile. Leave empty here to keep " +
+                            "the stored one.",
                         color = MidGray, fontSize = 11.sp
                     )
+                    existing?.let {
+                        Text(
+                            "Current SSH port: ${it.port}",
+                            color = MidGray, fontSize = 11.sp
+                        )
+                    }
                 }
 
                 Row(
@@ -364,7 +444,7 @@ fun EditProfileScreen(
                         Text("MapDNS (DNS without UDP)", color = Color.White, fontSize = 13.sp)
                         Text(
                             "Answers DNS on-device with fake IPs; real lookups happen " +
-                                "server-side over the SSH channel",
+                                "server-side over the tunnel (works for both engines)",
                             color = MidGray, fontSize = 11.sp
                         )
                     }
@@ -393,27 +473,36 @@ fun EditProfileScreen(
                     )
                 }
 
-                Divider(color = CardBorder)
+                if (engine == VpnConfig.VpnEngine.SSH) {
+                    Divider(color = CardBorder)
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("UDP Custom (udpgw client)", color = Color.White, fontSize = 13.sp)
-                        Text(
-                            "Tunnels app UDP through the VPS's udpgw - via the SSH " +
-                                "session when the provider allows it, otherwise direct " +
-                                "to the VPS port range (unencrypted, HTTP Custom style). " +
-                                "Needs a udpgw server on your VPS.",
-                            color = MidGray, fontSize = 11.sp
-                        )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("UDP Custom (udpgw client)", color = Color.White, fontSize = 13.sp)
+                            Text(
+                                "Tunnels app UDP through the VPS's udpgw - via the SSH " +
+                                    "session when the provider allows it, otherwise direct " +
+                                    "to the VPS port range (unencrypted, HTTP Custom style). " +
+                                    "Needs a udpgw server on your VPS.",
+                                color = MidGray, fontSize = 11.sp
+                            )
+                        }
+                        GoldSwitch(enableUdpState) { enableUdpState = it }
                     }
-                    GoldSwitch(enableUdpState) { enableUdpState = it }
-                }
-                LabeledField("udpgw Port (the VPS's UDP door - probe + client)", errors["udpPort"]) {
-                    GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)
+                    LabeledField("udpgw Port (the VPS's UDP door - probe + client)", errors["udpPort"]) {
+                        GoldTextField(udpPort, { udpPort = it }, keyboardType = KeyboardType.Number)
+                    }
+                } else {
+                    Divider(color = CardBorder)
+                    Text(
+                        "UDP is handled natively by the Xray engine (standard SOCKS5 UDP " +
+                            "ASSOCIATE) - no udpgw server or extra port needed.",
+                        color = MidGray, fontSize = 11.sp
+                    )
                 }
 
                 Divider(color = CardBorder)
@@ -498,6 +587,35 @@ private fun GoldTextField(
             cursorColor = Gold
         ),
         modifier = Modifier.fillMaxWidth()
+    )
+}
+
+/**
+ * Multi-line sibling of GoldTextField - used for the pasted Xray JSON config,
+ * which is long. Same visual treatment as every other field.
+ */
+@Composable
+private fun GoldTextArea(
+    value: String,
+    onChange: (String) -> Unit,
+    placeholder: String? = null
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        placeholder = placeholder?.let { { Text(it, color = MidGray) } },
+        singleLine = false,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = Gold,
+            unfocusedBorderColor = CardBorder,
+            focusedTextColor = Color.White,
+            unfocusedTextColor = Color.White,
+            cursorColor = Gold
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 200.dp)
     )
 }
 

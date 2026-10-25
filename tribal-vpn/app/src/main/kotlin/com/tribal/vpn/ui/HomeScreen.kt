@@ -101,7 +101,9 @@ fun HomeScreen(viewModel: VpnViewModel, onRequestConnect: () -> Unit = { viewMod
 
         Spacer(Modifier.height(24.dp))
 
-        ActiveProfileCard(profileName = activeProfile?.name, profileHost = activeProfile?.let { "${it.host}:${it.port}" })
+        // Engine-aware target label: an Xray profile shows "Xray engine"
+        // rather than a misleading "host:22" (it has no SSH endpoint).
+        ActiveProfileCard(profileName = activeProfile?.name, profileTarget = activeProfile?.endpointLabel)
     }
 }
 
@@ -163,7 +165,7 @@ private fun StatCard(label: String, value: String) {
 }
 
 @Composable
-private fun ActiveProfileCard(profileName: String?, profileHost: String?) {
+private fun ActiveProfileCard(profileName: String?, profileTarget: String?) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -175,7 +177,7 @@ private fun ActiveProfileCard(profileName: String?, profileHost: String?) {
         Spacer(Modifier.height(6.dp))
         if (profileName != null) {
             Text(profileName, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(profileHost ?: "", color = MidGray, fontSize = 12.sp)
+            Text(profileTarget ?: "", color = MidGray, fontSize = 12.sp)
         } else {
             Text("No profile selected", color = MidGray, fontSize = 13.sp)
         }

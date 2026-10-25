@@ -137,14 +137,22 @@ object NativeTunnelBridge {
     val isAvailable: Boolean get() = libraryLoaded
 
     /**
-     * Wires the tun fd to the local SOCKS5 proxy opened by SshTunnelService.
-     * The tun fd stays owned by TribalVpnService's ParcelFileDescriptor -
-     * we only hand the raw fd to hev and never close it here.
+     * Wires the tun fd to the local SOCKS5 endpoint of whichever engine is
+     * active. The tun fd stays owned by TribalVpnService's ParcelFileDescriptor
+     * - we only hand the raw fd to hev and never close it here.
      *
+     * @param socksAddr/socksPort the engine's local SOCKS5 endpoint: the SSH
+     *   engine's hand-rolled listener, or the Xray core's app-managed inbound.
      * @param filesDir absolute path of the app's files dir (for the config)
+     * @param udpMode how hev relays UDP to that endpoint - 'tcp' or 'udp'
+     *   (both values documented in upstream hev-socks5-tunnel's README).
+     *   The SSH engine's SOCKS5 server has no UDP ASSOCIATE, so it uses 'tcp'
+     *   (UDP-in-TCP FWD_UDP, bridged to the udpgw client). The Xray core's
+     *   socks inbound supports standard UDP ASSOCIATE (settings.udp=true),
+     *   so the Xray engine uses 'udp'.
      * @param mapDns optional MapDNS section (fake-IP DNS answered
      *   on-device; names resolved server-side via domain CONNECT); null =
-     *   omit the section.
+     *   omit the section. Engine-agnostic: it lives entirely in hev.
      * @return true iff hev accepted the config and started its relay worker.
      */
     fun startTunnel(
@@ -152,19 +160,24 @@ object NativeTunnelBridge {
         socksAddr: String,
         socksPort: Int,
         filesDir: String,
+        udpMode: String = "tcp",
         mapDns: MapDnsParams? = null
     ): Boolean {
         if (!libraryLoaded) {
             log("startTunnel: bridge library not loaded - relay cannot start (tun_fd=$tunFd)", isError = true)
             return false
         }
+        if (udpMode != "tcp" && udpMode != "udp") {
+            log("startTunnel: refusing unsupported udp mode '$udpMode' (expected 'tcp' or 'udp')", isError = true)
+            return false
+        }
         log(
             "startTunnel: natives in use are from variant ${loadedVariant ?: "none"} " +
                 "(hev's TProxy natives were registered at its first successful load)"
         )
-        // Config fields verified against upstream src/hev-config.c. udp 'tcp'
-        // because the app's SOCKS5 server has no UDP ASSOCIATE - UDP is
-        // Phase 5's job (badvpn-udpgw).
+        // Config fields verified against upstream src/hev-config.c + README
+        // (tunnel: name/mtu/ipv4, socks5: port/address/udp). The udp mode is
+        // per-engine - see the @param note above for why.
         val config = buildString {
             append("tunnel:\n")
             append("  name: tun0\n")
@@ -173,7 +186,7 @@ object NativeTunnelBridge {
             append("socks5:\n")
             append("  port: $socksPort\n")
             append("  address: $socksAddr\n")
-            append("  udp: 'tcp'\n")
+            append("  udp: '$udpMode'\n")
             if (mapDns != null) {
                 // mapdns keys verified in hev's pinned README + source:
                 // address/port = the DNS destination hev intercepts (must

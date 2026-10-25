@@ -1,18 +1,39 @@
 package com.tribal.vpn.data
 
+import com.tribal.vpn.xray.XrayConfigManager
 import kotlinx.serialization.Serializable
 
 /**
  * Represents a single saved VPN connection profile.
  * This is pure data - no hardcoded connection stats live here.
+ *
+ * A profile targets exactly ONE engine ([engine]):
+ *  - [VpnEngine.SSH]: the original sshj transport. [host]/[port]/[username]
+ *    and the auth fields are the real remote endpoint.
+ *  - [VpnEngine.XRAY]: the libv2ray/Xray-core engine. The remote endpoint
+ *    lives inside [xrayConfig] and the SSH fields are unused - they are kept
+ *    (not blanked) so switching a profile's engine back to SSH does not lose
+ *    what was already entered.
+ *
+ * Backward compatibility: a profile saved before the engine field existed
+ * decodes as SSH via the field default, so every pre-existing profile keeps
+ * behaving exactly as before.
  */
 @Serializable
 data class VpnConfig(
     val id: String,
     val name: String,
+    // Which engine connects this profile. Default SSH = the value every
+    // profile saved before this field existed gets on load.
+    val engine: VpnEngine = VpnEngine.SSH,
     val host: String,
     val port: Int = 22,
     val username: String,
+    // Full Xray JSON config for the XRAY engine (empty for SSH profiles).
+    // Opaque end to end: the app validates it structurally and injects its
+    // own loopback inbound at connect time, but never rewrites the user's
+    // outbounds/routing. Never written to logs (see XrayConfigManager).
+    val xrayConfig: String = "",
     val password: String = "",
     val authMethod: AuthMethod = AuthMethod.PASSWORD,
     val privateKeyAlias: String? = null, // reference into Android Keystore, never raw key material
@@ -44,11 +65,45 @@ data class VpnConfig(
     @Serializable
     enum class AuthMethod { PASSWORD, KEY }
 
+    /**
+     * Which connection engine a profile uses. The persisted values are these
+     * constant names - renaming an entry would orphan every saved profile,
+     * which is why VpnConfigTest pins the serialized form.
+     */
+    @Serializable
+    enum class VpnEngine { SSH, XRAY }
+
+    /**
+     * Honest one-line target label for the profile list and the home card.
+     * An Xray profile has no SSH endpoint to show, so it says what it is
+     * instead of rendering a misleading ":22" or "user@".
+     */
+    val endpointLabel: String
+        get() = if (engine == VpnEngine.XRAY) {
+            "Xray engine"
+        } else {
+            "$username@$host:$port"
+        }
+
+    /**
+     * Engine-aware validation.
+     *  - SSH: the original rules, unchanged, so existing profiles and their
+     *    auth behavior cannot regress.
+     *  - XRAY: the profile's own target is its config, so the config must be
+     *    structurally valid before anything is allowed to connect. The SSH
+     *    fields are deliberately not required.
+     */
     fun isValid(): Boolean {
-        if (name.isBlank() || host.isBlank() || username.isBlank()) return false
-        return when (authMethod) {
-            AuthMethod.PASSWORD -> password.isNotBlank()
-            AuthMethod.KEY -> !privateKeyAlias.isNullOrBlank()
+        if (name.isBlank()) return false
+        return when (engine) {
+            VpnEngine.XRAY -> XrayConfigManager.validateStructured(xrayConfig) == null
+            VpnEngine.SSH -> {
+                if (host.isBlank() || username.isBlank()) return false
+                when (authMethod) {
+                    AuthMethod.PASSWORD -> password.isNotBlank()
+                    AuthMethod.KEY -> !privateKeyAlias.isNullOrBlank()
+                }
+            }
         }
     }
 

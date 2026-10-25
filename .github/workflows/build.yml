@@ -27,6 +27,22 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: "Fetch pinned Xray engine artifact (libv2ray.aar, tag + sha256)"
+        # The Xray engine's Android artifact, pinned exactly like the hev
+        # submodule is pinned by commit: release tag v26.10.21 (whose go.mod
+        # pins Xray-core v1.260327.1-0.20261021115930-1b1647cd9ddf) plus the
+        # sha256 of the asset itself. Downloaded here rather than committed:
+        # it is ~57 MB and the dev phone has no storage. A hash mismatch fails
+        # the build before Gradle ever sees the file.
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          url="https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.10.21/libv2ray.aar"
+          sha="e56ec3b06485fe7b37af26948673951edf719c50d6bbc618b8539045952adde4"
+          curl -sSL --retry 3 -o app/libs/libv2ray.aar "$url"
+          echo "$sha  app/libs/libv2ray.aar" | sha256sum -c -
+          ls -l app/libs/libv2ray.aar
+
       - name: "Gate: ndk-build module-graph dry-runs (release a->b cascade + diagnostic)"
         # Runs BEFORE Gradle, after checkout (it needs the hev submodule
         # sources to parse). Standalone ndk-build dry-runs validate the
@@ -89,7 +105,7 @@ jobs:
           dry NDK_DEBUG=1 > dry_ndkdebug.txt 2>&1 || dump_and_die dry_ndkdebug.txt
           echo "GATE PASSED: release = a + b (b carries norelro), no c; diagnostic = a+b+c"
 
-      - name: "Build + unit tests (ndk-build bridge variants a/b/c, VpnConfig/SOCKS5 JVM tests)"
+      - name: "Build + unit tests (ndk-build bridge variants a/b/c, VpnConfig/SOCKS5/Xray JVM tests)"
         run: gradle :app:assembleDebug :app:testDebugUnitTest
 
       - name: Report native ELF segments + APK lib compression

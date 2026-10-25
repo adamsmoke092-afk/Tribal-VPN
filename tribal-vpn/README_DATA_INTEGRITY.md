@@ -17,6 +17,7 @@ implemented.
 | Saved profiles | `EncryptedSharedPreferences` (AES-256-GCM via Android Keystore) | `data/ConfigRepository.kt` |
 | Logs | Appended only from actual service lifecycle events (connecting, SSH authenticated, tunnel state, error, disconnected) | `vpn/TribalVpnService.kt`, `ssh/SshTunnelService.kt` |
 | SSH session + SOCKS5 proxy | Real `sshj` session with a hand-rolled RFC 1928 SOCKS5 server bridging into sshj `direct-tcpip` channels; `protect()` is called on the raw socket before connecting | `ssh/SshTunnelService.kt`, `ssh/Socks5Handshake.kt` |
+| Xray engine (second connection engine) | In-process Xray-core via the pinned `libv2ray.aar` (v26.10.21 + sha256). The app manages the loopback SOCKS5 inbound, validates the user's Xray JSON config, excludes its own uid from the VPN (this binding exposes no per-fd protect hook), and reports Connected only after `startLoop` + `isRunning` + the native relay all succeeded | `xray/XrayEngine.kt`, `xray/XrayConfigManager.kt`, `vpn/TribalVpnService.kt` |
 | Network change detection / reconnect | `ConnectivityManager.NetworkCallback` (real OS callbacks), exponential backoff 1s→60s | `vpn/NetworkChangeMonitor.kt`, wired into `TribalVpnService` |
 | "Ignore battery optimization" toggle | `PowerManager.isIgnoringBatteryOptimizations()`, queried live in `onCreate`/`onResume` — **not** a stored preference, since this permission can't be self-granted | `MainActivity.kt` |
 
@@ -128,3 +129,40 @@ call into the native/SSH layer, or an honest "not there yet" state.
    than one Activity talking to the service — flagged as scaffolding debt,
    not a correctness bug.
 5. Manual DNS leak test once #1 is done (Phase 6 Definition of Done).
+
+## What changed in this pass — 2026-10-25 (Xray engine = second connection engine)
+
+- **New: Xray-core as a second engine** (`xray/XrayEngine.kt`,
+  `xray/XrayConfigManager.kt`). A profile now carries an `engine` field
+  (`VpnEngine.SSH` default / `VpnEngine.XRAY`). Profiles saved before the field
+  existed decode as SSH and behave exactly as before — pinned by tests in
+  `VpnConfigTest`.
+- **Engine seam:** the engine only decides which local SOCKS5 endpoint
+  `hev-socks5-tunnel` forwards into — the existing sshj SOCKS5 listener, or the
+  Xray core's app-managed loopback inbound (kernel-allocated port). tun0,
+  MapDNS, MTU, the bypass list, traffic stats and auto-reconnect are shared and
+  unchanged.
+- **Pinned artifact:** `libv2ray.aar` v26.10.21 (AndroidLibXrayLite, whose
+  `go.mod` pins Xray-core `v1.260327.1-0.20261021115930-1b1647cd9ddf`),
+  downloaded and sha256-verified by CI, never committed (~57 MB; the dev phone
+  has no storage). Licenses: libXray LGPL-3.0, Xray-core MPL-2.0. Details and
+  the supported config format: `XRAY_INTEGRATION.md`.
+- **Socket protection:** that binding exposes no per-fd protect callback, so for
+  Xray profiles the app excludes its **own uid** from the VPN
+  (`Builder.addDisallowedApplication(packageName)` — the mechanism v2rayNG's
+  `CoreVpnService` uses). Core outbound traffic therefore cannot loop back into
+  tun0, and a failed exclusion aborts the connection instead of pretending. The
+  SSH engine keeps its per-socket `protect()` path untouched.
+- **Honesty rules carried over:** the runtime config is validated twice (editor
+  + `connect()`), a direct-only (`freedom`-only) config is rejected, `startLoop`'s
+  synchronous errors **and** a post-start `isRunning` check both gate Connected,
+  and a failed core or relay tears down tun0 rather than reporting success. Logs
+  carry a structure-only config summary — never config text (UUIDs, passwords,
+  addresses).
+- **APK size:** the AAR adds Xray for the ABIs the project already targets
+  (arm64-v8a, armeabi-v7a, x86_64; x86 is filtered out). Expect a much larger
+  APK — the exact lib sizes are printed by the CI run's APK listing step.
+- **Not yet verified on-device.** CI compiles the app and runs the JVM tests
+  (`XrayConfigManagerTest` + the engine-compatibility tests in `VpnConfigTest`);
+  no Xray connection has been made on a phone yet. `XRAY_INTEGRATION.md` lists
+  the exact log lines to look for when testing.

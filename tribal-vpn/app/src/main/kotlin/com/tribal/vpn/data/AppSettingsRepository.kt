@@ -2,6 +2,7 @@ package com.tribal.vpn.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +62,23 @@ class AppSettingsRepository(context: Context) {
         _probeAllVariants.value = enabled
     }
 
+    /**
+     * Stable per-install random key for the Xray engine's XUDP session-id
+     * encryption (`xray.xudp.basekey`, set through libv2ray's initCoreEnv).
+     * It is not a credential this app ever transmits - it only has to be
+     * random and stable across reconnects and process restarts. Generated
+     * lazily on first use and then persisted; plain prefs are fine because
+     * the value is not a user secret (unlike VpnConfig passwords).
+     */
+    fun xrayXudpBasekey(): String {
+        prefs.getString(KEY_XRAY_XUDP_BASEKEY, null)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+        val generated = UUID.randomUUID().toString().replace("-", "")
+        prefs.edit().putString(KEY_XRAY_XUDP_BASEKEY, generated).apply()
+        return generated
+    }
+
     private fun readBypassApps(): List<String> {
         val raw = prefs.getString(KEY_BYPASS_APPS, null)
             ?: return listOf(DEFAULT_BYPASS_APP)
@@ -72,6 +90,7 @@ class AppSettingsRepository(context: Context) {
         private const val KEY_BIOMETRIC_LOCK = "require_biometrics"
         private const val KEY_PROBE_ALL_VARIANTS = "probe_all_variants"
         private const val KEY_BYPASS_APPS = "bypass_apps"
+        private const val KEY_XRAY_XUDP_BASEKEY = "xray_xudp_basekey"
         private const val DEFAULT_BYPASS_APP = "com.termux"
     }
 }

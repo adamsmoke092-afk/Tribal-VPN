@@ -113,6 +113,18 @@ dependencies {
     // Phase 3: SSH transport
     implementation("com.hierynomus:sshj:0.38.0")
 
+    // Xray engine (the second connection engine). libv2ray.aar is the pinned
+    // AndroidLibXrayLite release artifact; CI downloads and sha256-verifies it
+    // into app/libs/ before Gradle runs (see .github/workflows/build.yml), and
+    // it is NEVER committed (see .gitignore) - it is ~57 MB and the dev phone
+    // has no storage for it. Local builds must fetch it first:
+    //   curl -L -o app/libs/libv2ray.aar \
+    //     https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.10.21/libv2ray.aar
+    // A missing AAR is a hard compile error (unresolved libv2ray.* imports in
+    // xray/XrayEngine.kt). That is deliberate: the Xray engine must never
+    // vanish silently from a build.
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
+
     // Same BouncyCastle artifact+version sshj 0.38.0 bundles internally
     // (implementation-scoped there, so it is not on our compile classpath).
     // We need the Provider class directly to swap out Android's stub "BC" -

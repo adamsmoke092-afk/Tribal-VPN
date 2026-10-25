@@ -272,4 +272,85 @@ class VpnConfigTest {
         assertEquals("198.18.0.0", decoded.mapDnsNetwork)
         assertEquals("255.254.0.0", decoded.mapDnsNetmask)
     }
+
+    // --- Engine selection (SSH vs Xray) ---------------------------------
+
+    private fun xrayConfigJson(): String =
+        """{"outbounds": [{"protocol": "vless", "settings": {"vnext": []}}]}"""
+
+    @Test
+    fun `old profiles without an engine field decode as SSH`() {
+        // Pinned load-side behavior: every profile saved before the engine
+        // field existed must keep behaving as the SSH profile it always was -
+        // same validation, same endpoint label, no migration step.
+        val json = Json { ignoreUnknownKeys = true }
+        val decoded = json.decodeFromString<VpnConfig>(
+            """{"id":"1","name":"Test","host":"vps.example.com","username":"root","password":"pw"}"""
+        )
+        assertEquals(VpnConfig.VpnEngine.SSH, decoded.engine)
+        assertTrue(decoded.isValid())
+        assertEquals("root@vps.example.com:22", decoded.endpointLabel)
+    }
+
+    @Test
+    fun `engine is written explicitly so a future default change cannot rewrite saves`() {
+        val json = repoJson()
+        val encoded = json.encodeToString(baseConfig())
+        assertTrue(
+            "engine must be stored explicitly, not implied by a default",
+            encoded.contains("\"engine\":\"SSH\"")
+        )
+    }
+
+    @Test
+    fun `xray profile round trips with its config`() {
+        val json = repoJson()
+        val original = baseConfig(
+            host = "", username = "", password = ""
+        ).copy(
+            engine = VpnConfig.VpnEngine.XRAY,
+            xrayConfig = xrayConfigJson()
+        )
+        val decoded = json.decodeFromString<VpnConfig>(json.encodeToString(original))
+        assertEquals(VpnConfig.VpnEngine.XRAY, decoded.engine)
+        assertEquals(xrayConfigJson(), decoded.xrayConfig)
+        assertEquals("Xray engine", decoded.endpointLabel)
+    }
+
+    @Test
+    fun `xray profile is valid without an ssh host or username`() {
+        val config = baseConfig(host = "", username = "", password = "").copy(
+            engine = VpnConfig.VpnEngine.XRAY,
+            xrayConfig = xrayConfigJson()
+        )
+        assertTrue(config.isValid())
+    }
+
+    @Test
+    fun `xray profile with an empty or invalid config fails validation`() {
+        val empty = baseConfig(host = "", username = "", password = "").copy(
+            engine = VpnConfig.VpnEngine.XRAY,
+            xrayConfig = ""
+        )
+        assertFalse(empty.isValid())
+
+        val noOutbounds = empty.copy(xrayConfig = """{"outbounds": []}""")
+        assertFalse(noOutbounds.isValid())
+
+        val directOnly = empty.copy(xrayConfig = """{"outbounds": [{"protocol": "freedom"}]}""")
+        assertFalse(directOnly.isValid())
+    }
+
+    @Test
+    fun `ssh profile validation and behavior are unchanged by the engine field`() {
+        // Exactly the rules that existed before the Xray engine - an SSH
+        // profile that was valid stays valid, and the SSH-only requirements
+        // still hold.
+        assertTrue(baseConfig().isValid())
+        assertFalse(baseConfig(host = "").isValid())
+        assertFalse(baseConfig(username = "").isValid())
+        assertFalse(baseConfig(password = "").isValid())
+        // An SSH profile ignores xrayConfig entirely (it is unused there).
+        assertTrue(baseConfig().copy(xrayConfig = "not even json").isValid())
+    }
 }

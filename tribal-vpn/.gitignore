@@ -7,3 +7,7 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Pinned Xray engine artifact (~57 MB): downloaded + sha256-verified by CI (and
+# by local builds on demand), never committed.
+app/libs/*.aar

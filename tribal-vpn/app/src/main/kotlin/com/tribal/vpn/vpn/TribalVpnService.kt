@@ -72,6 +72,10 @@ class TribalVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var activeSshTunnel: com.tribal.vpn.ssh.SshTunnelService? = null
+    // True only while the Xray engine owns the active connection. The two
+    // engines never run at the same time for one profile; teardown uses this
+    // flag to stop exactly the engine that was started.
+    private var activeXrayEngine = false
     private var serviceJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var trafficTickerJob: Job? = null
@@ -158,26 +162,68 @@ class TribalVpnService : VpnService() {
                     ?: throw IllegalStateException(
                         "UDP port range '${config.udpPortRange}' is not a port or lo-hi range - edit the profile"
                     )
-                val sshConfig = com.tribal.vpn.ssh.SshConfig(
-                    host = config.host,
-                    port = config.port,
-                    username = config.username,
-                    password = if (config.authMethod == VpnConfig.AuthMethod.PASSWORD) config.password else null,
-                    privateKeyAlias = if (config.authMethod == VpnConfig.AuthMethod.KEY) config.privateKeyAlias else null,
-                    mapDnsNetwork = mapDnsNetwork,
-                    mapDnsNetmask = mapDnsNetmask,
-                    udpgwPort = config.udpGatewayPort,
-                    udpPortRange = udpPortRange,
-                    enableUdp = config.enableUdp,
-                    dnsAddress = config.preferredDns.trim()
-                )
-                val sshTunnel = com.tribal.vpn.ssh.SshTunnelService(
-                    config = sshConfig,
-                    protectSocket = { socket -> protect(socket) },
-                    onLog = { plain, technical, isError -> appendLog(plain, technical, isError) }
-                )
-                sshTunnel.connect()
-                activeSshTunnel = sshTunnel
+                // --- Engine selection: exactly ONE engine per connection ---
+                // The engine decides only which LOCAL SOCKS5 endpoint the
+                // packet relay forwards into - the SSH engine's own listener,
+                // or the Xray core's app-managed inbound. tun0,
+                // hev-socks5-tunnel, traffic stats and reconnect logic below
+                // are shared and unchanged for both engines.
+                val isXray = config.engine == VpnConfig.VpnEngine.XRAY
+                val localSocksPort: Int
+                if (isXray) {
+                    // Inbound port chosen by the kernel (bind 0, read back,
+                    // release) - never a hardcoded "usually free" port.
+                    val xraySocksPort = com.tribal.vpn.xray.XrayConfigManager.allocateLoopbackPort()
+                    val runtimeConfig = com.tribal.vpn.xray.XrayConfigManager.buildRuntimeConfig(
+                        config.xrayConfig,
+                        xraySocksPort
+                    )
+                    // Diagnostics carry structure only (protocols/counts) -
+                    // never config text, which holds UUIDs and passwords.
+                    appendLog(
+                        "Starting Xray engine...",
+                        "engine=xray inbound=127.0.0.1:$xraySocksPort config[" +
+                            com.tribal.vpn.xray.XrayConfigManager.summarizeForLog(config.xrayConfig) + "]"
+                    )
+                    com.tribal.vpn.xray.XrayEngine.init(
+                        context = applicationContext,
+                        xudpBasekey = appSettings.xrayXudpBasekey(),
+                        onLog = { plain, technical, isError -> appendLog(plain, technical, isError) }
+                    )
+                    // Throws on any startup failure and leaves nothing
+                    // running - the catch block below then aborts the whole
+                    // connection honestly (no Connected, tun0 closed).
+                    com.tribal.vpn.xray.XrayEngine.start(
+                        runtimeConfigJson = runtimeConfig,
+                        onLog = { plain, technical, isError -> appendLog(plain, technical, isError) }
+                    )
+                    activeXrayEngine = true
+                    localSocksPort = xraySocksPort
+                } else {
+                    val sshConfig = com.tribal.vpn.ssh.SshConfig(
+                        host = config.host,
+                        port = config.port,
+                        username = config.username,
+                        password = if (config.authMethod == VpnConfig.AuthMethod.PASSWORD) config.password else null,
+                        privateKeyAlias = if (config.authMethod == VpnConfig.AuthMethod.KEY) config.privateKeyAlias else null,
+                        mapDnsNetwork = mapDnsNetwork,
+                        mapDnsNetmask = mapDnsNetmask,
+                        udpgwPort = config.udpGatewayPort,
+                        udpPortRange = udpPortRange,
+                        enableUdp = config.enableUdp,
+                        dnsAddress = config.preferredDns.trim()
+                    )
+                    val sshTunnel = com.tribal.vpn.ssh.SshTunnelService(
+                        config = sshConfig,
+                        protectSocket = { socket -> protect(socket) },
+                        onLog = { plain, technical, isError -> appendLog(plain, technical, isError) }
+                    )
+                    sshTunnel.connect()
+                    activeSshTunnel = sshTunnel
+                    // The port the SOCKS listener ACTUALLY bound to (kernel-
+                    // assigned, since socksBindPort is 0).
+                    localSocksPort = sshTunnel.socksPort
+                }
 
                 // --- Phase 1: establish tun interface ---
                 val builder = Builder()
@@ -205,6 +251,35 @@ class TribalVpnService : VpnService() {
                     } else if (config.alternateDns.isNotBlank()) {
                         builder.addDnsServer(config.alternateDns)
                     }
+                }
+
+                // Socket protection for the Xray engine. The core runs
+                // in-process (libv2ray) and that binding exposes no per-fd
+                // protect callback, so instead of per-socket protect() we
+                // exclude THIS app's own uid from the VPN: the core's outbound
+                // sockets - and its own DNS resolution of the server address -
+                // then travel the underlying network directly and can never be
+                // routed back into tun0. Same mechanism v2rayNG's
+                // CoreVpnService uses for its own package id. The SSH engine
+                // keeps its protect()-per-socket path, unchanged.
+                if (isXray) {
+                    try {
+                        builder.addDisallowedApplication(packageName)
+                    } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
+                        // Without the exclusion the core's traffic would loop
+                        // back into tun0 - refuse rather than pretend.
+                        throw IllegalStateException(
+                            "Could not exclude this app's uid from the VPN (addDisallowedApplication " +
+                                "failed) - the Xray core's outbound traffic would loop back into tun0, " +
+                                "so the connection is aborted",
+                            e
+                        )
+                    }
+                    appendLog(
+                        null,
+                        "Xray engine: app uid excluded from the VPN so core outbound " +
+                            "traffic reaches the server directly (never through tun0)"
+                    )
                 }
 
                 // Bypass list: these apps keep the phone's normal connection
@@ -245,11 +320,17 @@ class TribalVpnService : VpnService() {
                 val tunnelStarted = NativeTunnelBridge.startTunnel(
                     tunFd = vpnInterface!!.fd,
                     socksAddr = "127.0.0.1",
-                    // The port the SOCKS listener ACTUALLY bound to (kernel-
-                    // assigned, since socksBindPort is 0) - not the requested
-                    // default, which is just the "any free port" sentinel.
-                    socksPort = sshTunnel.socksPort,
+                    // The port the ACTIVE engine's SOCKS5 endpoint really
+                    // bound to (kernel-assigned for both engines) - not a
+                    // requested default, which is only the "any free port"
+                    // sentinel.
+                    socksPort = localSocksPort,
                     filesDir = filesDir.absolutePath,
+                    // SSH: the app's SOCKS5 server has no UDP ASSOCIATE, so
+                    // hev frames UDP over TCP and the udpgw client bridges it.
+                    // Xray: the core's socks inbound supports standard UDP
+                    // ASSOCIATE (settings.udp=true) - no udpgw needed.
+                    udpMode = if (isXray) "udp" else "tcp",
                     mapDns = if (config.enableMapDns) {
                         MapDnsParams(
                             dnsAddress = config.preferredDns.trim(),
@@ -274,10 +355,11 @@ class TribalVpnService : VpnService() {
                     throw IllegalStateException("Native packet relay failed to start")
                 }
 
-                // UDP Custom no longer goes through a native udpgw stub: the
-                // Kotlin udpgw client inside SshTunnelService (armed during
-                // sshTunnel.connect() when the profile enables it) bridges
-                // hev's FWD_UDP flows to the VPS udpgw. Nothing to do here.
+                // SSH engine only: UDP Custom does not go through a native
+                // udpgw stub - the Kotlin udpgw client inside SshTunnelService
+                // (armed during sshTunnel.connect() when the profile enables
+                // it) bridges hev's FWD_UDP flows to the VPS udpgw. The Xray
+                // engine needs none of it (standard SOCKS5 UDP ASSOCIATE).
 
                 trafficMonitor.start()
                 startTrafficTicker()
@@ -286,7 +368,12 @@ class TribalVpnService : VpnService() {
                 networkMonitor.resetBackoff()
 
                 _connectionState.value = ConnectionState.CONNECTED
-                appendLog("Connected", "tun0 established, mtu=${config.mtu}")
+                // Reached only after the engine reported running AND the
+                // native relay accepted its config - never before.
+                appendLog(
+                    "Connected",
+                    "engine=${if (isXray) "xray" else "ssh"}, tun0 established, mtu=${config.mtu}"
+                )
                 updateNotification(ConnectionState.CONNECTED)
 
             } catch (e: CancellationException) {
@@ -299,9 +386,14 @@ class TribalVpnService : VpnService() {
                 _connectionState.value = ConnectionState.ERROR
                 appendLog("Connection failed: ${e.message}", e.stackTraceToString(), isError = true)
                 updateNotification(ConnectionState.ERROR)
+                // Teardown of a PARTIAL startup, safe order: stop the relay
+                // first (nothing forwards frames any more), then whichever
+                // engine did start, then close tun0 last so the phone gets
+                // its normal internet back.
                 NativeTunnelBridge.stopTunnel()
                 activeSshTunnel?.disconnect()
                 activeSshTunnel = null
+                stopXrayEngineIfActive()
                 cleanupInterface()
             }
         }
@@ -314,12 +406,27 @@ class TribalVpnService : VpnService() {
         NativeTunnelBridge.stopTunnel()
         activeSshTunnel?.disconnect()
         activeSshTunnel = null
+        stopXrayEngineIfActive()
         cleanupInterface()
         trafficMonitor.stop()
         _connectionState.value = ConnectionState.DISCONNECTED
         appendLog("Disconnected", "VPN connection closed by user")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /**
+     * Stops the Xray core if this service started it. Idempotent, safe to call
+     * from every teardown path (disconnect, failed connect, onDestroy): the
+     * flag is cleared before the stop call so a second teardown cannot stop a
+     * core some later connection has since started.
+     */
+    private fun stopXrayEngineIfActive() {
+        if (!activeXrayEngine) return
+        activeXrayEngine = false
+        com.tribal.vpn.xray.XrayEngine.stop { plain, technical, isError ->
+            appendLog(plain, technical, isError)
+        }
     }
 
     private fun cleanupInterface() {
@@ -354,6 +461,9 @@ class TribalVpnService : VpnService() {
         networkMonitor.stop()
         trafficTickerJob?.cancel()
         serviceJob?.cancel()
+        // Service destruction must not leave the in-process Xray core running
+        // once the VPN itself is gone.
+        stopXrayEngineIfActive()
         cleanupInterface()
         super.onDestroy()
     }

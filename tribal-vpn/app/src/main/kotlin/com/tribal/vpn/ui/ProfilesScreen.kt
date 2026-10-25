@@ -133,7 +133,7 @@ private fun ProfileCard(
                     }
                 }
             }
-            Text("${profile.username}@${profile.host}", color = MidGray, fontSize = 12.sp)
+            Text(profile.endpointLabel, color = MidGray, fontSize = 12.sp)
         }
         IconButton(onClick = onEdit) {
             Icon(Icons.Filled.Edit, contentDescription = "Edit ${profile.name}", tint = MidGray)
