@@ -38,7 +38,7 @@ socket, `udp: 'tcp'` in the hev config, udpgw for UDP).
 | Artifact | `libv2ray.aar`, AndroidLibXrayLite **v26.10.21** | release assets; the same file v2rayNG's own CI downloads |
 | Pinned core | Xray-core `v1.260327.1-0.20261021115930-1b1647cd9ddf` (that release's `go.mod`) | AndroidLibXrayLite `go.mod` |
 | sha256 | `e56ec3b06485fe7b37af26948673951edf719c50d6bbc618b8539045952adde4` | GitHub release API |
-| ABIs | gomobile defaults: arm64-v8a, armeabi-v7a, x86, x86_64 (`-androidapi 24`) | AndroidLibXrayLite `main.yml` |
+| ABIs | the AAR carries gomobile's default set (arm64-v8a, armeabi-v7a, x86, x86_64; `libgojni.so` per ABI, `-androidapi 24`) — the app **packages only arm64-v8a + armeabi-v7a** | AndroidLibXrayLite `main.yml`; gomobile `cmd/gomobile/bind_androidapp.go` |
 | Java package | `libv2ray` + gomobile's `go.Seq` | `-javapkg` absent; v2rayNG's imports |
 | Start | `Libv2ray.newCoreController(handler)` then `controller.startLoop(json, tunFd)` | binding Go source |
 | Stop / state | `controller.stopLoop()`, `controller.isRunning` | binding Go source |
@@ -119,10 +119,10 @@ nothing, exactly the fake success this project forbids.
 - **Port race (documented, honest):** the loopback port is probed by binding
   and releasing; a rare collision surfaces as a core start failure, never as a
   fake Connected.
-- **APK size:** the AAR carries Xray for several ABIs (~57 MB unpacked);
-  `abiFilters` keeps only arm64-v8a, armeabi-v7a, x86_64 (x86 is dropped, as
-  the project already does for its own native code). Expect a significantly
-  larger APK - measured in CI, see the run's APK lib listing.
+- **APK size / ABIs:** the AAR carries Xray for four ABIs (~57 MB unpacked);
+  the app packages only **arm64-v8a and armeabi-v7a** (`abiFilters`, changed
+  2026-10-26), so exactly one Xray `libgojni.so` ships per retained ABI.
+  Measured before/after sizes are recorded in README_DATA_INTEGRITY.md.
 - **UDP path** is standard SOCKS5 UDP ASSOCIATE (`socks5.udp: 'udp'`), which
   the Xray socks inbound supports. Whether app UDP actually flows end-to-end
   through a given outbound is a property of that outbound, untested here.
@@ -136,6 +136,10 @@ nothing, exactly the fake success this project forbids.
   `XrayConfigManagerTest` (validation, rejection, inbound injection, outbound
   preservation, log normalisation, redaction, port allocation) and new
   engine-compatibility tests in `VpnConfigTest`.
+- **Packaged ABIs:** the CI step `Verify APK ABI contents (gate: arm64-v8a +
+  armeabi-v7a only)` inspects the built APK and fails the build unless both
+  retained ABIs contain `libhev-socks5-tunnel.so`, `libtribal_bridge_a/b.so`
+  and the Xray `libgojni.so`, and unless zero `lib/x86*/` entries are packaged.
 - **On-device networking: NOT DONE YET.** Requires an APK install and a real
   Xray profile. On-device evidence to look for in Logs: `Xray core running
   (startLoop returned, isRunning=true)`, `app uid excluded from the VPN`,

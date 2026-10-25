@@ -159,9 +159,12 @@ call into the native/SSH layer, or an honest "not there yet" state.
   and a failed core or relay tears down tun0 rather than reporting success. Logs
   carry a structure-only config summary — never config text (UUIDs, passwords,
   addresses).
-- **APK size:** the AAR adds Xray for the ABIs the project already targets
-  (arm64-v8a, armeabi-v7a, x86_64; x86 is filtered out). Expect a much larger
-  APK — the exact lib sizes are printed by the CI run's APK listing step.
+- **APK size / ABIs (2026-10-26):** the app now ships **arm64-v8a + armeabi-v7a
+  only** — x86 and x86_64 were dropped, which removes a full Xray-core
+  `libgojni.so` for every dropped ABI. Both retained ABIs carry the hev relay
+  (`libhev-socks5-tunnel.so`), the bridge variants and the Xray core; the CI
+  gate "Verify APK ABI contents" fails the build if any other ABI ships or one
+  of those libraries goes missing.
 - **Not yet verified on-device.** CI compiles the app and runs the JVM tests
   (`XrayConfigManagerTest` + the engine-compatibility tests in `VpnConfigTest`);
   no Xray connection has been made on a phone yet. `XRAY_INTEGRATION.md` lists

@@ -103,10 +103,67 @@ jobs:
             }
           done
           dry NDK_DEBUG=1 > dry_ndkdebug.txt 2>&1 || dump_and_die dry_ndkdebug.txt
-          echo "GATE PASSED: release = a + b (b carries norelro), no c; diagnostic = a+b+c"
+          # armeabi-v7a is the other retained ABI: its release-parity parse
+          # must produce the same module set (hev + variants a/b, no c),
+          # proving the relay still builds for 32-bit ARM.
+          dry_v7a() {
+            "$NDKBUILD" -n NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
+              APP_ABI=armeabi-v7a APP_PLATFORM=android-26 "$@"
+          }
+          dry_v7a NDK_DEBUG=0 > dry_v7a_release.txt 2>&1 || dump_and_die dry_v7a_release.txt
+          if grep -q "tribal_bridge_c" dry_v7a_release.txt; then
+            echo "FATAL: debug-only variant c exists in the armeabi-v7a release parse"
+            dump_and_die dry_v7a_release.txt
+          fi
+          for m in libtribal_bridge_a.so libtribal_bridge_b.so libhev-socks5-tunnel.so; do
+            grep -q "$m" dry_v7a_release.txt || {
+              echo "FATAL: $m missing from the armeabi-v7a release parse"
+              dump_and_die dry_v7a_release.txt
+            }
+          done
+          echo "GATE PASSED: release = a + b (b carries norelro), no c; diagnostic = a+b+c; armeabi-v7a release = a+b+hev"
 
       - name: "Build + unit tests (ndk-build bridge variants a/b/c, VpnConfig/SOCKS5/Xray JVM tests)"
         run: gradle :app:assembleDebug :app:testDebugUnitTest
+
+      - name: "Verify APK ABI contents (gate: arm64-v8a + armeabi-v7a only)"
+        # Exactly the two retained ABIs must ship, for BOTH native components:
+        # the local hev relay + bridge variants (ndk-build) and the pinned Xray
+        # core (gomobile writes jni/<abi>/libgojni.so - verified in gomobile's
+        # cmd/gomobile/bind_androidapp.go). Without this gate a dropped ABI
+        # would only show up as an on-device UnsatisfiedLinkError, so the build
+        # fails loudly instead. The packaged list is printed either way.
+        run: |
+          set -euo pipefail
+          APK="$(find app/build/outputs -name '*.apk' | head -n1)"
+          echo "APK: $APK"
+          unzip -Z1 "$APK" | grep '^lib/' | sort > apk_libs.txt || true
+          echo "=== packaged native libraries ==="
+          cat apk_libs.txt
+          fail=0
+          for abi in arm64-v8a armeabi-v7a; do
+            for so in libhev-socks5-tunnel.so libgojni.so \
+                      libtribal_bridge_a.so libtribal_bridge_b.so; do
+              if grep -qx "lib/$abi/$so" apk_libs.txt; then
+                echo "OK      lib/$abi/$so"
+              else
+                echo "MISSING lib/$abi/$so"
+                fail=1
+              fi
+            done
+          done
+          if grep -Eq '^lib/(x86|x86_64)/' apk_libs.txt; then
+            echo "FATAL: unshipped ABIs are packaged:"
+            grep -E '^lib/(x86|x86_64)/' apk_libs.txt
+            fail=1
+          else
+            echo "OK      no x86/x86_64 native libraries packaged"
+          fi
+          if [ "$fail" -ne 0 ]; then
+            echo "APK ABI GATE FAILED (see MISSING/FATAL lines above)"
+            exit 1
+          fi
+          echo "APK ABI GATE PASSED: arm64-v8a + armeabi-v7a only, both components present"
 
       - name: Report native ELF segments + APK lib compression
         # Diagnostic only: it must never block the APK artifact from
@@ -114,9 +171,13 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
+          # NB: the linux-x86_64 below is the NDK's HOST toolchain directory
+          # (the runner is x86_64 Linux) - it is not a target ABI. The packaged
+          # target ABIs are arm64-v8a + armeabi-v7a, asserted by the ABI gate.
           READELF="$(ls -d "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf 2>/dev/null | head -n1)"
           echo "readelf: ${READELF:-NOT FOUND}"
-          find app/build -type f -name '*.so' -path '*arm64-v8a*' | sort -u | while read -r so; do
+          find app/build -type f -name '*.so' \
+            \( -path '*arm64-v8a*' -o -path '*armeabi-v7a*' \) | sort -u | while read -r so; do
             echo "=== $so ==="
             if [ -n "$READELF" ]; then
               "$READELF" -lW "$so" | grep -E 'LOAD|GNU_RELRO' || echo '(no LOAD/RELRO lines)'

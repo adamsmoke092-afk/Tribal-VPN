@@ -16,9 +16,15 @@ android {
         versionName = "1.0"
 
         ndk {
-            // arm64-v8a is primary target per roadmap; armeabi-v7a for legacy
-            // devices, x86_64 for emulator testing.
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            // Shipped ABIs: arm64-v8a (primary target / the dev phone) and
+            // armeabi-v7a (legacy 32-bit devices). x86/x86_64 are deliberately
+            // NOT packaged: the pinned libv2ray.aar would otherwise contribute
+            // a full Xray-core libgojni.so for every extra ABI (see
+            // XRAY_INTEGRATION.md). abiFilters drives BOTH the ndk-build ABIs
+            // in this module AND the ABI filtering of prebuilt libs from the
+            // AAR; the CI step "Verify APK ABI contents" asserts the packaged
+            // set and fails the build if another ABI ships or one goes missing.
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
         externalNativeBuild {
