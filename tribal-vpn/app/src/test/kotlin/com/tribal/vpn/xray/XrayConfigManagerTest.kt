@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
@@ -24,7 +25,10 @@ import org.junit.Test
  */
 class XrayConfigManagerTest {
 
-    private val uuid = "e179c288-6f45-4ef5-b970-66be278faadc"
+    // Synthetic on purpose: test fixtures must never contain a real
+    // credential (UUIDs, passwords) - not even one from a config someone
+    // pasted into a chat.
+    private val uuid = "01234567-89ab-cdef-0123-456789abcdef"
     private val serverHost = "vpn.example-host.test"
 
     /** A realistic user config in the supported format. */
@@ -258,5 +262,153 @@ class XrayConfigManagerTest {
         java.net.ServerSocket().use { probe ->
             probe.bind(java.net.InetSocketAddress("127.0.0.1", port))
         }
+    }
+
+    // --- removed TLS fields (allowInsecure) ------------------------------
+
+    /**
+     * The exact on-device failure this round: the pinned core (v26.10.21)
+     * hard-errors while building the outbound's TLS config when
+     * tlsSettings.allowInsecure is true. Validation must catch it BEFORE
+     * XrayEngine.start() runs, name the exact JSON path, name the CURRENT
+     * replacement fields, and leak no config values.
+     */
+    @Test
+    fun `allowInsecure true is rejected with the exact json path before native startup`() {
+        val config = """
+            {"outbounds": [{"protocol": "vless", "settings": {"vnext": [
+                {"address": "$serverHost", "port": 443,
+                 "users": [{"id": "$uuid", "encryption": "none"}]}]},
+              "streamSettings": {"network": "ws", "security": "tls",
+                "tlsSettings": {"serverName": "front.example.test",
+                                "alpn": ["h2"],
+                                "fingerprint": "chrome",
+                                "allowInsecure": true}}}]}
+        """.trimIndent()
+        val reason = XrayConfigManager.validateStructured(config)
+        assertNotNull("allowInsecure:true must be rejected", reason)
+        assertTrue(
+            "must name the exact JSON path, was: $reason",
+            reason!!.contains("outbounds[0].streamSettings.tlsSettings.allowInsecure")
+        )
+        assertTrue(
+            "must name the CURRENT replacement field (not the removed one)",
+            reason.contains("pinnedPeerCertSha256")
+        )
+        assertTrue(
+            "must name the CURRENT replacement field",
+            reason.contains("verifyPeerCertByName")
+        )
+        // Secret-safety: the message may name paths only, never values.
+        assertFalse("uuid leaked into the error", reason.contains(uuid))
+        assertFalse("host leaked into the error", reason.contains(serverHost))
+        // Defense in depth: even a caller that skipped validateStructured
+        // cannot get this config to the native core.
+        try {
+            XrayConfigManager.buildRuntimeConfig(config, 12345)
+            throw AssertionError("buildRuntimeConfig must refuse allowInsecure:true")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message!!.contains("rejected"))
+        }
+    }
+
+    @Test
+    fun `allowInsecure false is tolerated and preserved verbatim`() {
+        // The pinned core declares `AllowInsecure bool` and errors only when
+        // it is true (infra/conf/transport_security.go, `if c.AllowInsecure`).
+        // A false value is a dead field the core tolerates, so the app must
+        // neither reject it nor rewrite it.
+        val config = """
+            {"outbounds": [{"protocol": "vless", "settings": {"vnext": []},
+              "streamSettings": {"network": "tcp", "security": "tls",
+                "tlsSettings": {"allowInsecure": false}}}]}
+        """.trimIndent()
+        assertNull(XrayConfigManager.validateStructured(config))
+        val runtime = json.parseToJsonElement(
+            XrayConfigManager.buildRuntimeConfig(config, 12345)
+        ).jsonObject
+        val tls = (runtime["outbounds"] as JsonArray)[0]
+            .jsonObject["streamSettings"]!!.jsonObject["tlsSettings"]!!.jsonObject
+        assertEquals(false, (tls["allowInsecure"] as JsonPrimitive).booleanOrNull)
+    }
+
+    @Test
+    fun `allowInsecure true in a non-first outbound is found among multiple outbounds`() {
+        val config = """
+            {"outbounds": [
+               {"tag": "direct", "protocol": "freedom"},
+               {"tag": "proxy", "protocol": "vless", "settings": {"vnext": []},
+                "streamSettings": {"network": "tcp", "security": "tls",
+                  "tlsSettings": {"allowInsecure": true}}}]}
+        """.trimIndent()
+        val reason = XrayConfigManager.validateStructured(config)
+        assertNotNull(reason)
+        assertTrue(
+            "must point at the second outbound, was: $reason",
+            reason!!.contains("outbounds[1].streamSettings.tlsSettings.allowInsecure")
+        )
+    }
+
+    @Test
+    fun `valid tls configuration without obsolete fields passes and preserves everything`() {
+        val config = """
+            {"outbounds": [{"protocol": "vless", "settings": {"vnext": [
+                {"address": "$serverHost", "port": 443,
+                 "users": [{"id": "$uuid", "encryption": "none"}]}]},
+              "streamSettings": {"network": "ws", "security": "tls",
+                "tlsSettings": {"serverName": "front.example.test",
+                                "alpn": ["h2", "http/1.1"],
+                                "fingerprint": "chrome",
+                                "pinnedPeerCertSha256":
+                                  "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"}}}]}
+        """.trimIndent()
+        assertNull(XrayConfigManager.validateStructured(config))
+        val runtime = json.parseToJsonElement(
+            XrayConfigManager.buildRuntimeConfig(config, 12345)
+        ).jsonObject
+        val outbound = (runtime["outbounds"] as JsonArray)[0].jsonObject
+        // Unrelated fields preserved exactly through validation + runtime
+        // assembly: VLESS id, server address, transport, security, server
+        // name, alpn, fingerprint - and the modern pin field.
+        val vnext = (outbound["settings"]!!.jsonObject["vnext"] as JsonArray)[0].jsonObject
+        val user = (vnext["users"] as JsonArray)[0].jsonObject
+        assertEquals(uuid, (user["id"] as JsonPrimitive).content)
+        assertEquals(serverHost, (vnext["address"] as JsonPrimitive).content)
+        val stream = outbound["streamSettings"]!!.jsonObject
+        assertEquals("tls", (stream["security"] as JsonPrimitive).content)
+        assertEquals("ws", (stream["network"] as JsonPrimitive).content)
+        val tls = stream["tlsSettings"]!!.jsonObject
+        assertEquals("front.example.test", (tls["serverName"] as JsonPrimitive).content)
+        assertEquals("chrome", (tls["fingerprint"] as JsonPrimitive).content)
+        assertNotNull("modern pin field must survive", tls["pinnedPeerCertSha256"])
+        assertNotNull("alpn must survive", tls["alpn"])
+    }
+
+    @Test
+    fun `no-tls configuration passes untouched`() {
+        // security "none" is expressed purely through the pasted JSON - the
+        // editor has no security selector. The pipeline must accept it and
+        // preserve it; nothing ever downgrades TLS to no-TLS automatically.
+        val config = """
+            {"outbounds": [{"protocol": "vless", "settings": {"vnext": [
+                {"address": "$serverHost", "port": 80,
+                 "users": [{"id": "$uuid", "encryption": "none"}]}]},
+              "streamSettings": {"network": "tcp", "security": "none"}}]}
+        """.trimIndent()
+        assertNull(XrayConfigManager.validateStructured(config))
+        val runtime = json.parseToJsonElement(
+            XrayConfigManager.buildRuntimeConfig(config, 12345)
+        ).jsonObject
+        val stream = (runtime["outbounds"] as JsonArray)[0]
+            .jsonObject["streamSettings"]!!.jsonObject
+        assertEquals("none", (stream["security"] as JsonPrimitive).content)
+    }
+
+    @Test
+    fun `config with no streamSettings at all passes`() {
+        // No streamSettings means no TLS negotiation at all - same no-TLS
+        // case as above, expressed by absence.
+        val config = """{"outbounds": [{"protocol": "vless", "settings": {"vnext": []}}]}"""
+        assertNull(XrayConfigManager.validateStructured(config))
     }
 }

@@ -82,6 +82,34 @@ empty config, unparseable JSON, non-object root, missing/empty/non-array
 (`freedom`-only) config - which would connect "successfully" while tunnelling
 nothing, exactly the fake success this project forbids.
 
+**Removed-field validation (2026-10-26):** the pinned core (v26.10.21)
+hard-errors at config-build time while `tlsSettings.allowInsecure` is `true`
+("The feature \"allowInsecure\" has been removed and migrated to
+\"pinnedPeerCert(Sha256...)\" and \"verifyPeerCertByName(vcn)\"." - verified in
+`infra/conf/transport_security.go` at the pinned commit: the field survives as
+a plain `bool` and the guard is `if c.AllowInsecure`). The validator therefore
+rejects any boolean-true `allowInsecure` ANYWHERE in the config before the core
+runs, naming the exact JSON path (e.g.
+`outbounds[0].streamSettings.tlsSettings.allowInsecure`) and no config values.
+The app does **not** rewrite or auto-migrate security fields - the user removes
+the field from their own JSON. Two facts worth knowing:
+- `allowInsecure: false` is tolerated and preserved verbatim (the core
+  declares the field as a plain bool and only errors when it is true).
+- The CURRENT replacement fields are `tlsSettings.pinnedPeerCertSha256`
+  (comma-separated hex SHA-256 pins) and `tlsSettings.verifyPeerCertByName`
+  (comma-separated names). The older `pinnedPeerCertificateChainSha256` no
+  longer exists in the schema and is never recommended by the app.
+
+**Transport security is expressed through the pasted JSON - there is no UI
+selector.** The profile editor offers no TLS/no-TLS choice, so nothing can
+switch modes behind the user's back: a config with
+`streamSettings.security: "none"` (or no `tlsSettings` at all) passes
+validation untouched, and a TLS error never downgrades a profile to no-TLS.
+If a no-TLS UI choice is ever added, it must be an explicit user selection
+(defaulting to TLS) with the visible warning
+"Unencrypted — traffic is not protected by TLS and may be visible to your
+network." directly next to the choice - not buried in Advanced.
+
 ## Diagnostics and secrecy
 
 - The durable log records the engine, the loopback inbound port, and a

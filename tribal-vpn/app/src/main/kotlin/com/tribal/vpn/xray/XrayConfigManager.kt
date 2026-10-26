@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -63,6 +64,34 @@ object XrayConfigManager {
         "vless://", "vmess://", "trojan://", "ss://", "socks://", "ssr://"
     )
 
+    /**
+     * Fields REMOVED from Xray's TLS schema that the pinned core hard-errors
+     * on. Verified in the pinned source (infra/conf/transport_security.go at
+     * 1b1647cd9ddf0abc34b981d4611fc03bcac1ca74 = the v26.10.21 release
+     * commit):
+     *
+     *     AllowInsecure            bool   `json:"allowInsecure"`
+     *     ...
+     *     if c.AllowInsecure {
+     *         return nil, errors.PrintRemovedFeatureError(`allowInsecure`,
+     *             `"pinnedPeerCertSha256"(pcs) and "verifyPeerCertByName"(vcn)`)
+     *     }
+     *
+     * The field is a plain bool (not *bool), so the core errors ONLY when the
+     * value is true; `allowInsecure: false` parses as a dead field and is
+     * tolerated - this validator mirrors exactly that (reject true, tolerate
+     * and preserve false). The CURRENT replacements are
+     * "tlsSettings.pinnedPeerCertSha256" and "tlsSettings.verifyPeerCertByName"
+     * (both comma-separated strings in the same struct); the older
+     * "pinnedPeerCertificateChainSha256" no longer exists in the struct, so
+     * error messages must never recommend it.
+     *
+     * If a second removed field is ever added here, the human-readable
+     * sentence in validateStructured (which names "allowInsecure") must be
+     * generalized with it.
+     */
+    private val removedTlsFields = setOf("allowInsecure")
+
     // Mirrors ConfigRepository's Json so normalization/round-trip behavior is
     // identical in app and tests.
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -117,6 +146,26 @@ object XrayConfigManager {
                 return "Outbound #${index + 1} has no \"protocol\" string"
             }
             protocols += protocol
+        }
+
+        // Fields the pinned core rejects at config-build time. Caught HERE so
+        // the user gets a precise, secret-free error in the editor (at save)
+        // and in the connect log - instead of a raw core error after startup
+        // began. Paths name keys and indices only, never values, so the
+        // message is safe to display and log even though configs carry
+        // credentials. The app does NOT rewrite or auto-migrate security
+        // fields (there is no fingerprint to invent): the user removes the
+        // field from their own JSON.
+        val removedPaths = ArrayList<String>()
+        collectRemovedTlsFields(root, "", removedPaths)
+        if (removedPaths.isNotEmpty()) {
+            return "Removed Xray field(s) found: ${removedPaths.joinToString(", ")}. " +
+                "\"allowInsecure\" no longer exists in Xray's TLS schema - the pinned core " +
+                "(v26.10.21) fails to start while it is true. Its current replacements are " +
+                "\"tlsSettings.pinnedPeerCertSha256\" and \"tlsSettings.verifyPeerCertByName\". " +
+                "Remove the field from your JSON; this app does not rewrite security-related " +
+                "fields. (Configs converted from share links usually carry it under " +
+                "outbounds[*].streamSettings.tlsSettings.)"
         }
 
         // A config whose outbounds are ALL freedom does not tunnel anything:
@@ -203,6 +252,37 @@ object XrayConfigManager {
                 probe.close()
             } catch (_: Exception) {
             }
+        }
+    }
+
+    /**
+     * Walks [element] collecting the JSON paths of removed TLS fields whose
+     * value would make the pinned core hard-error (see [removedTlsFields]).
+     * Only boolean-true occurrences are collected, mirroring the core's own
+     * `if c.AllowInsecure` condition; `false` is a dead field the core
+     * tolerates, and a wrongly-typed value is left for the core's decoder to
+     * reject honestly. Paths contain keys and indices only - never values -
+     * so the collected list is safe to show and log.
+     */
+    private fun collectRemovedTlsFields(
+        element: JsonElement,
+        path: String,
+        out: MutableList<String>
+    ) {
+        when (element) {
+            is JsonObject -> element.forEach { (key, value) ->
+                val childPath = if (path.isEmpty()) key else "$path.$key"
+                if (key in removedTlsFields &&
+                    (value as? JsonPrimitive)?.booleanOrNull == true
+                ) {
+                    out += childPath
+                }
+                collectRemovedTlsFields(value, childPath, out)
+            }
+            is JsonArray -> element.forEachIndexed { index, item ->
+                collectRemovedTlsFields(item, "$path[$index]", out)
+            }
+            else -> Unit
         }
     }
 
